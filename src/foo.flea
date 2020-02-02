@@ -1,0 +1,8 @@
+(fn bar () i64
+    (return (+ 1 (call foo))))
+
+(fn main () i64
+    (return (+ (call bar) 1)))
+
+(fn foo () i64
+    (return 8))
