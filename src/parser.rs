@@ -393,7 +393,7 @@ pub enum Node {
     },
     Call {
         name: Id,
-        args: Vec<Id>,
+        params: Vec<Id>,
 
         // todo(chad): bitflag?
         is_macro: bool,
@@ -675,16 +675,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_call(&mut self, start: Location, name: Id) -> Result<Id, CompileError> {
-        let mut args = Vec::new();
+        let mut params = Vec::new();
         while self.lexer.top.tok != Token::CloseParen {
-            args.push(self.parse_expression()?);
+            params.push(self.parse_expression()?);
         }
         let range = self.expect_close_paren(start)?;
         let call = self.push_node(
             range,
             Node::Call {
                 name,
-                args,
+                params,
                 is_macro: false,
                 is_indirect: false,
             },
@@ -1132,7 +1132,7 @@ impl<'a> Parser<'a> {
             }
             Node::Call {
                 name,
-                args,
+                params,
                 is_macro,
                 is_indirect,
             } => format!(
@@ -1145,7 +1145,8 @@ impl<'a> Parser<'a> {
                     "call"
                 },
                 self.debug(*name),
-                args.iter()
+                params
+                    .iter()
                     .map(|a| self.debug(*a))
                     .collect::<Vec<_>>()
                     .join(", ")

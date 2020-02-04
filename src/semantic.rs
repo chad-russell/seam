@@ -251,17 +251,17 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Call { name, args, is_macro, is_indirect } => if *is_macro {
-                for arg in args {
-                    self.assign_type(*arg)?;
+            Node::Call { name, params, is_macro, is_indirect } => if *is_macro {
+                for param in params {
+                    self.assign_type(*param)?;
                 }
 
                 self.assign_type(*name)?;
                 self.types[id] =  Type::Basic(BasicType::None);
                 Ok(())
             } else if *is_indirect {
-                for arg in args {
-                    self.assign_type(*arg)?;
+                for param in params {
+                    self.assign_type(*param)?;
                 }
 
                 self.assign_type(*name)?;
@@ -282,8 +282,8 @@ impl<'a> Semantic<'a> {
                     )),
                 }
             } else {
-                for arg in args {
-                    self.assign_type(*arg)?;
+                for param in params {
+                    self.assign_type(*param)?;
                 }
 
                 self.assign_type(*name)?;

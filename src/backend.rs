@@ -4,7 +4,7 @@ use crate::semantic::Semantic;
 use cranelift::codegen::ir::{FuncRef, Signature};
 use cranelift::prelude::{
     types, AbiParam, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
-    Value as CraneliftValue, Variable,
+    Type as CraneliftType, Value as CraneliftValue, Variable,
 };
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
@@ -220,7 +220,7 @@ impl<'a> Backend<'a> {
                 // todo(chad): find a way to reuse these
                 let mut module: Module<SimpleJITBackend> = {
                     let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
-                    jit_builder.symbol("__wrapper", wrapper as *const u8);
+                    jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
                     }
@@ -269,28 +269,28 @@ impl<'a> Backend<'a> {
                 builder.switch_to_block(ebb);
                 builder.append_ebb_params_for_function_params(ebb);
 
-                let wrapper_func = {
-                    let mut wrapper_sig = module.make_signature();
+                let dfp_decl = {
+                    let mut dfp_sig = module.make_signature();
 
-                    wrapper_sig.params.push(AbiParam::new(types::I32));
-                    wrapper_sig.returns.push(AbiParam::new(types::I64));
+                    dfp_sig.params.push(AbiParam::new(types::I64));
+                    dfp_sig
+                        .returns
+                        .push(AbiParam::new(module.isa().pointer_type()));
 
-                    let wrapper_func_id = module
-                        .declare_function("__wrapper", Linkage::Import, &wrapper_sig)
+                    let dfp_func_id = module
+                        .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
                         .unwrap();
 
-                    module.declare_func_in_func(wrapper_func_id, &mut builder.func)
+                    module.declare_func_in_func(dfp_func_id, &mut builder.func)
                 };
-
-                let local_scope = self.semantic.parser.node_scopes[id];
-                let local_scope = &self.semantic.parser.scopes[local_scope];
 
                 let mut fb = FunctionBackend {
                     semantic: &self.semantic,
                     values: &mut self.values,
                     builder: &mut builder,
                     local_id: 0,
-                    wrapper_func,
+                    dynamic_fn_ptr_decl: dfp_decl,
+                    module: &mut module,
                 };
                 for stmt in stmts.iter() {
                     fb.compile_id(*stmt)?;
@@ -344,7 +344,8 @@ struct FunctionBackend<'a, 'b, 'c> {
     values: &'a mut Vec<Value>,
     builder: &'a mut Builder<'c>,
     local_id: u32,
-    wrapper_func: FuncRef,
+    dynamic_fn_ptr_decl: FuncRef,
+    module: &'a mut Module<SimpleJITBackend>,
 }
 
 impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
@@ -431,34 +432,62 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::Call {
-                name, // Id
-                args, // Vec<Id>
+                name,   // Id
+                params, // Vec<Id>
                 is_macro: _,
                 is_indirect: _,
             } => {
+                // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
+
                 self.compile_id(*name)?;
-                for arg in args {
-                    self.compile_id(*arg)?;
+                for param in params {
+                    self.compile_id(*param)?;
                 }
 
-                // let cranelift_args = args
-                //     .iter()
-                //     .map(|a| self.values[*a].as_cranelift_value())
-                //     .collect::<Vec<_>>();
-
-                // println!("retrieving {} as func ref", *name);
                 let func_sym = self.values[*name].as_func_ref();
-                // let func_id = self.funcs[&func_ref];
-                // let func_ref = self
-                //     .module
-                //     .declare_func_in_func(func_id, &mut self.builder.func);
 
-                let cranelift_args = [self
+                let cranelift_params = [self
                     .builder
                     .ins()
-                    .iconst(types::I32, func_sym.to_usize() as i64)];
+                    .iconst(types::I64, func_sym.to_usize() as i64)];
 
-                let call_inst = self.builder.ins().call(self.wrapper_func, &cranelift_args);
+                let call_inst = self
+                    .builder
+                    .ins()
+                    .call(self.dynamic_fn_ptr_decl, &cranelift_params);
+                let value = self.builder.func.dfg.inst_results(call_inst)[0];
+
+                // Now call indirect
+                let func_ty = &self.semantic.types[*name];
+                let return_ty = match func_ty {
+                    Type::Func { return_ty, .. } => Some(*return_ty),
+                    _ => None,
+                }
+                .unwrap();
+
+                let mut sig = self.module.make_signature();
+                for param in params.iter() {
+                    sig.params
+                        .push(AbiParam::new(get_cranelift_type(&self.semantic, *param)?));
+                }
+
+                sig.returns.push(AbiParam::new(get_cranelift_type(
+                    &self.semantic,
+                    return_ty,
+                )?));
+                sig.returns.push(AbiParam::new(types::I64));
+
+                let cranelift_params = params
+                    .iter()
+                    .map(|param| self.values[*param].as_cranelift_value())
+                    .collect::<Vec<_>>();
+
+                let sig = self.builder.import_signature(sig);
+                let call_inst = self
+                    .builder
+                    .ins()
+                    .call_indirect(sig, value, &cranelift_params);
+
                 let value = self.builder.func.dfg.inst_results(call_inst)[0];
                 self.set_value(id, value);
 
@@ -527,6 +556,7 @@ impl TryInto<types::Type> for &Type {
     fn try_into(self) -> Result<types::Type, &'static str> {
         match self {
             &Type::Basic(bt) => match bt {
+                BasicType::Bool => Ok(types::I32), // todo(chad): I8?
                 BasicType::I32 => Ok(types::I32),
                 BasicType::I64 => Ok(types::I64),
                 BasicType::F32 => Ok(types::F32),
@@ -539,12 +569,6 @@ impl TryInto<types::Type> for &Type {
 }
 
 // todo(chad): this would be dynamically generated/cached on the fly for the real version, so we could handle any combination of arguments
-fn wrapper(sym: Sym) -> i64 {
-    let fp = {
-        let func_ptrs = FUNC_PTRS.lock().unwrap();
-        func_ptrs[&sym]
-    };
-
-    let f = unsafe { std::mem::transmute::<_, fn() -> i64>(fp) };
-    f()
+fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
+    FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
