@@ -1,6 +1,5 @@
 (fn main () i64
-    (let a bool (call bar))
-    (let b i64 (if a 3 5))
+    (let b i64 (if (call bar) 3 5))
     (return b))
 
 (fn bar () bool
