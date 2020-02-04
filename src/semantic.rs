@@ -1,6 +1,6 @@
-use string_interner::Sym;
+use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Range, Type};
+type Sym = usize;
 
 pub struct Semantic<'a> {
     pub parser: Parser<'a>,
@@ -59,12 +59,24 @@ impl<'a> Semantic<'a> {
                 self.types[id] =  Type::String;
                 Ok(())
             }
-            Node::Def { name, expr } => {
+            Node::Let { name, ty, expr } => {
                 self.parser.scope_insert(*name, id);
 
+                self.assign_type(*ty)?;
                 self.assign_type(*expr)?;
-                self.types[id] =  self.types[*expr].clone();
-                Ok(())
+
+                if !self.types_match_id(*ty, *expr) {
+                    let ty1 = self.types[*ty].clone();
+                    let ty2 = self.types[*expr].clone();
+
+                    Err(CompileError::from_string(
+                        format!("Type mismatch: {:?} vs {:?}", ty1, ty2),
+                        self.parser.ranges[id],
+                    ))
+                } else {
+                    self.types[id] =  self.types[*expr].clone();
+                    Ok(())
+                }
             }
             Node::Add(arg1, arg2) | Node::Sub(arg1, arg2) | Node::Mul(arg1, arg2) | Node::Div(arg1, arg2) => {
                 self.assign_type(*arg1)?;
@@ -73,7 +85,7 @@ impl<'a> Semantic<'a> {
                 let ty1: Type = self.types[*arg1].clone();
                 let ty2: Type = self.types[*arg2].clone();
 
-                if !self.types_equivalent(&ty1, &ty2) {
+                if !self.types_match_ty(&ty1, &ty2) {
                     Err(CompileError::from_string(
                         format!("Type mismatch: {:?} vs {:?}", ty1, ty2),
                         self.parser.ranges[id],
@@ -90,7 +102,7 @@ impl<'a> Semantic<'a> {
                 let ty1: Type = self.types[*arg1].clone();
                 let ty2: Type = self.types[*arg2].clone();
 
-                if !self.types_equivalent(&ty1, &ty2) {
+                if !self.types_match_ty(&ty1, &ty2) {
                     Err(CompileError::from_string(
                         format!("Type mismatch: {:?} vs {:?}", ty1, ty2),
                         self.parser.ranges[id],
@@ -153,9 +165,24 @@ impl<'a> Semantic<'a> {
                 self.assign_type(*cond_id)?;
                 self.assign_type(*true_id)?;
 
+                // todo(chad): assert boolean type for cond_id
+
                 if false_id.is_some() {
                     self.assign_type(false_id.unwrap())?;
+
+                    if !self.types_match_id(*true_id, false_id.unwrap()) {
+                        let ty1 = self.types[*true_id].clone();
+                        let ty2 = self.types[false_id.unwrap()].clone();
+
+                        return Err(CompileError::from_string(
+                            format!("Types for 'if' don't match: {:?} vs {:?}", ty1, ty2), 
+                            self.parser.ranges[id]
+                        ));
+                    }
                 }
+
+                // todo(chad): enforce unit type for single-armed if stmts
+                self.types[id] = self.types[*true_id].clone();
 
                 Ok(())
             }
@@ -304,7 +331,13 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn types_equivalent(&self, ty1: &Type, ty2: &Type) -> bool {
+    fn types_match_id(&self, ty1: Id, ty2: Id) -> bool {
+        let ty1 = self.types[ty1].clone();
+        let ty2 = self.types[ty2].clone();
+        self.types_match_ty(&ty1, &ty2)
+    }
+
+    fn types_match_ty(&self, ty1: &Type, ty2: &Type) -> bool {
         match (ty1, ty2) {
             (Type::Pointer(pt1), Type::Pointer(pt2)) => self.types[*pt1] == self.types[*pt2],
             _ => ty1 == ty2,
@@ -321,10 +354,5 @@ impl<'a> Semantic<'a> {
                 ),
                 self.parser.ranges[id],
             ))
-    }
-
-    fn push_node(&mut self, range: Range, node: Node) -> Id {
-        self.types.push(Type::Unassigned);
-        self.parser.push_node(range, node)
     }
 }

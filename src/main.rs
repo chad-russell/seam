@@ -6,29 +6,36 @@ mod parser;
 mod semantic;
 
 use backend::Backend;
-use parser::Parser;
-use semantic::Semantic;
 
 fn main() {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
-    let mut parser = Parser::new(&source);
-    parser
-        .parse()
-        .map_err(|e| panic!("Parser error: {:?}", e))
+    let backend = Backend::bootstrap_from_source(&source)
+        .map_err(|e| panic!("Error bootstrapping from source: {:?}", e))
         .unwrap();
+    dbg!(backend.call_func("main"));
 
-    let mut semantic = Semantic::new(parser);
-    semantic
-        .assign_top_level_types()
-        .map_err(|e| panic!("Semantic error: {:?}", e))
-        .unwrap();
+    // backend
+    //     .update_source(
+    //         "
+    // (fn foo () i64
+    //     (return (+ 101 (call baz))))
 
-    let mut backend = Backend::new(semantic);
-    backend
-        .compile()
-        .map_err(|e| panic!("Backend error: {:?}", e))
-        .unwrap();
+    // (fn main () i64
+    //     (return (+ (call bar) 1)))
 
-    let main_ret = backend.call_func_no_args_i32_return("main");
-    dbg!(main_ret);
+    // (fn baz () i64
+    //     (return 1))
+
+    // (fn bar () i64
+    //     (return (+ 1 (call foo))))
+    //     ",
+    //     )
+    //     .map_err(|e| panic!("Error bootstrapping from source: {:?}", e))
+    //     .unwrap();
+
+    // backend
+    //     .recompile_function("foo")
+    //     .map_err(|e| panic!("Error recompiling function: {:?}", e))
+    //     .unwrap();
+    // dbg!(backend.call_func("main"));
 }

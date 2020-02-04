@@ -2,18 +2,14 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ops::Deref;
 
-use string_interner::{StringInterner, Sym};
+use string_interner::StringInterner;
+
+type Sym = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
     line: usize,
     col: usize,
-}
-
-impl Location {
-    pub fn new(line: usize, col: usize) -> Self {
-        Self { line, col }
-    }
 }
 
 impl Default for Location {
@@ -94,18 +90,18 @@ impl Lexeme {
 }
 
 pub struct Lexer<'a> {
-    string_interner: Box<StringInterner<Sym>>,
+    pub string_interner: Box<StringInterner<Sym>>,
 
-    source: &'a str,
-    loc: Location,
+    pub source: &'a str,
+    pub loc: Location,
 
     top: Lexeme,
     second: Lexeme,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
-        let string_interner = Box::new(StringInterner::default());
+    pub fn new(source: &'a str) -> Self {
+        let string_interner = Box::new(StringInterner::new());
 
         Self {
             string_interner,
@@ -114,6 +110,16 @@ impl<'a> Lexer<'a> {
             top: Lexeme::new(Token::EOF, Default::default()),
             second: Lexeme::new(Token::EOF, Default::default()),
         }
+    }
+
+    pub fn update_source(&mut self, source: &'a str) {
+        self.source = source;
+        self.loc = Default::default();
+        self.top = Lexeme::new(Token::EOF, Default::default());
+        self.second = Lexeme::new(Token::EOF, Default::default());
+
+        self.pop();
+        self.pop();
     }
 
     #[inline]
@@ -167,7 +173,7 @@ impl<'a> Lexer<'a> {
         self.string_interner.deref().resolve(sym).unwrap()
     }
 
-    fn pop(&mut self) {
+    pub fn pop(&mut self) {
         self.eat_spaces();
 
         let start = self.loc;
@@ -257,9 +263,10 @@ impl<'a> Lexer<'a> {
 }
 
 #[derive(Default, Debug)]
-struct Scope {
-    parent: Option<Id>,
-    entries: BTreeMap<Sym, Id>,
+pub struct Scope {
+    pub parent: Option<Id>,
+    pub entries: BTreeMap<Sym, Id>,
+    pub locals: Vec<Id>,
 }
 
 impl Scope {
@@ -267,6 +274,7 @@ impl Scope {
         Self {
             parent: Some(parent),
             entries: Default::default(),
+            locals: Default::default(),
         }
     }
 }
@@ -277,16 +285,18 @@ pub struct Parser<'a> {
 
     pub lexer: Lexer<'a>,
 
-    node_scopes: Vec<Id>,
+    pub node_scopes: Vec<Id>,
 
-    scopes: Vec<Scope>,
+    pub scopes: Vec<Scope>,
     top_scope: Id,
 
+    // todo(chad): represent list of locals per function
     pub top_level: Vec<Id>,
-    calls: Vec<(Id, usize)>,
+    pub top_level_map: BTreeMap<Sym, Id>,
+    pub calls: Vec<(Id, usize)>,
 
     sym_fn: Sym,
-    sym_def: Sym,
+    sym_let: Sym,
     sym_store: Sym,
     sym_ptr: Sym,
     sym_ptrcast: Sym,
@@ -359,8 +369,9 @@ pub enum Node {
         ptr: Id,
         expr: Id,
     },
-    Def {
+    Let {
         name: Sym,
+        ty: Id,
         expr: Id,
     },
     Extern {
@@ -431,11 +442,10 @@ impl<'a> Parser<'a> {
         lexer.pop();
 
         let sym_fn = lexer.string_interner.get_or_intern("fn");
-        let sym_def = lexer.string_interner.get_or_intern("def");
+        let sym_let = lexer.string_interner.get_or_intern("let");
         let sym_ptr = lexer.string_interner.get_or_intern("ptr");
         let sym_ptrcast = lexer.string_interner.get_or_intern("ptrcast");
         let sym_store = lexer.string_interner.get_or_intern("store");
-        let sym_load = lexer.string_interner.get_or_intern("load");
         let sym_call = lexer.string_interner.get_or_intern("call");
         let sym_return = lexer.string_interner.get_or_intern("return");
         let sym_none = lexer.string_interner.get_or_intern("none");
@@ -462,23 +472,6 @@ impl<'a> Parser<'a> {
         let sym_true = lexer.string_interner.get_or_intern("true");
         let sym_false = lexer.string_interner.get_or_intern("false");
         let sym_extern = lexer.string_interner.get_or_intern("extern");
-        let sym_compiler_ast_return = lexer.string_interner.get_or_intern("compiler.ast.return");
-        let sym_compiler_ast_int_literal = lexer
-            .string_interner
-            .get_or_intern("compiler.ast.int-literal");
-        let sym_compiler_ast_def = lexer.string_interner.get_or_intern("compiler.ast.def");
-        let sym_compiler_ast_symbol = lexer.string_interner.get_or_intern("compiler.ast.symbol");
-        let sym_compiler_ast_not = lexer.string_interner.get_or_intern("compiler.ast.not");
-        let sym_compiler_ast_eq = lexer.string_interner.get_or_intern("compiler.ast.=");
-        let sym_compiler_ast_stack_alloc = lexer
-            .string_interner
-            .get_or_intern("compiler.ast.stack-alloc");
-        let sym_compiler_ast_heap_alloc = lexer
-            .string_interner
-            .get_or_intern("compiler.ast.heap-alloc");
-        let sym_compiler_ast_symbol_eq =
-            lexer.string_interner.get_or_intern("compiler.ast.symbol=");
-        let sym_compiler_ast_call = lexer.string_interner.get_or_intern("compiler.ast.call");
 
         let scopes = vec![Scope {
             parent: None,
@@ -493,9 +486,10 @@ impl<'a> Parser<'a> {
             scopes: scopes,
             top_scope: 0,
             top_level: Default::default(),
+            top_level_map: Default::default(),
             calls: Default::default(),
             sym_fn,
-            sym_def,
+            sym_let,
             sym_ptr,
             sym_ptrcast,
             sym_store,
@@ -537,8 +531,17 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    pub fn get_top_level(&self, name: impl Into<String>) -> Option<Id> {
+        let sym = self.lexer.string_interner.get(name.into()).unwrap();
+        self.top_level_map.get(&sym).map(|x| *x)
+    }
+
     pub fn scope_insert(&mut self, sym: Sym, id: Id) {
         self.scopes[self.top_scope].entries.insert(sym, id);
+    }
+
+    pub fn local_insert(&mut self, id: Id) {
+        self.scopes[self.top_scope].locals.push(id);
     }
 
     pub fn scope_get_with_scope_id(&self, sym: Sym, scope: Id) -> Option<Id> {
@@ -658,7 +661,7 @@ impl<'a> Parser<'a> {
                     Err(CompileError::from_string(
                         format!(
                             "Unrecognized type {}",
-                            self.lexer.string_interner.resolve(sym).unwrap()
+                            self.lexer.string_interner.resolve(sym).unwrap(),
                         ),
                         self.lexer.top.range,
                     ))
@@ -709,17 +712,20 @@ impl<'a> Parser<'a> {
 
     fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
         let cond_expr = self.parse_expression()?;
-        let true_expr = self.parse_fn_stmt()?;
+        let true_expr = self.parse_expression()?;
 
         let false_expr = if self.lexer.top.tok != Token::CloseParen {
-            Some(self.parse_fn_stmt()?)
+            Some(self.parse_expression()?)
         } else {
             None
         };
 
         let range = self.expect_close_paren(start)?;
+        let if_id = self.push_node(range, Node::If(cond_expr, true_expr, false_expr));
 
-        Ok(self.push_node(range, Node::If(cond_expr, true_expr, false_expr)))
+        self.local_insert(if_id);
+
+        Ok(if_id)
     }
 
     fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
@@ -875,13 +881,15 @@ impl<'a> Parser<'a> {
                 self.lexer.pop();
 
                 let sym = self.parse_sym()?;
-                if sym == self.sym_def {
+                if sym == self.sym_let {
                     let name = self.parse_sym()?;
+                    let ty = self.parse_type()?;
                     let expr = self.parse_expression()?;
                     let range = self.expect_close_paren(start)?;
-                    let def_id = self.push_node(range, Node::Def { name, expr });
-                    self.scope_insert(name, def_id);
-                    Ok(def_id)
+                    let let_id = self.push_node(range, Node::Let { name, ty, expr });
+                    self.scope_insert(name, let_id);
+                    self.local_insert(let_id);
+                    Ok(let_id)
                 } else if sym == self.sym_if {
                     self.parse_if(start)
                 } else if sym == self.sym_while {
@@ -987,6 +995,7 @@ impl<'a> Parser<'a> {
         self.top_scope = old_top_scope;
 
         self.scope_insert(name, func);
+        self.top_level_map.insert(name, func);
 
         Ok(func)
     }
@@ -1061,11 +1070,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn debug_sym(&self, sym: Sym) -> String {
+    pub fn debug_sym(&self, sym: Sym) -> String {
         String::from(self.lexer.string_interner.resolve(sym).unwrap())
     }
 
-    fn debug(&self, id: Id) -> String {
+    pub fn debug(&self, id: Id) -> String {
         match &self.nodes[id] {
             Node::Symbol(sym) => self.debug_sym(*sym),
             Node::IntLiteral(i) => format!("{}", i),
@@ -1077,9 +1086,12 @@ impl<'a> Parser<'a> {
             Node::Store { ptr, expr } => {
                 format!("(store {} {})", self.debug(*ptr), self.debug(*expr))
             }
-            Node::Def { name, expr } => {
-                format!("(def {} {})", self.debug_sym(*name), self.debug(*expr))
-            }
+            Node::Let { name, ty, expr } => format!(
+                "(let {} {} {})",
+                self.debug_sym(*name),
+                self.debug(*ty),
+                self.debug(*expr)
+            ),
             Node::PtrCast { ty, expr } => {
                 format!("(ptrcast {} {})", self.debug(*ty), self.debug(*expr))
             }
@@ -1166,27 +1178,6 @@ impl<'a> Parser<'a> {
                     .collect::<Vec<_>>()
                     .join("\n")
             ),
-        }
-    }
-
-    fn resolve(&self, id: Id) -> Result<Id, CompileError> {
-        let node = &self.nodes[id];
-        match node {
-            Node::Symbol(sym) => {
-                let found = self.scope_get(*sym, id).ok_or(CompileError::from_string(
-                    format!(
-                        "Undeclared identifier {}",
-                        self.lexer
-                            .string_interner
-                            .resolve(*sym)
-                            .expect("resolve unchecked")
-                    ),
-                    self.ranges[id],
-                ))?;
-                self.resolve(found)
-            }
-            Node::Def { name: _, expr } => self.resolve(*expr),
-            _ => Ok(id),
         }
     }
 }

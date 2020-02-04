@@ -1,8 +1,6 @@
-(fn bar () i64
-    (return (+ 1 (call foo))))
-
 (fn main () i64
-    (return (+ (call bar) 1)))
+    (let a i64 (if false 5 3))
+    (return (+ a (call bar))))
 
-(fn foo () i64
-    (return 8))
+(fn bar () i64
+    (return 5))
