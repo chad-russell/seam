@@ -297,8 +297,11 @@ pub struct Parser<'a> {
 
     sym_fn: Sym,
     sym_let: Sym,
+    sym_set: Sym,
     sym_store: Sym,
     sym_ptr: Sym,
+    sym_ref: Sym,
+    sym_load: Sym,
     sym_ptrcast: Sym,
     sym_call: Sym,
     sym_return: Sym,
@@ -361,6 +364,8 @@ pub enum Node {
     StringLiteral(String),
     TypeLiteral(Type),
     Return(Id),
+    Ref(Id),
+    Load(Id),
     PtrCast {
         ty: Id,
         expr: Id,
@@ -372,6 +377,10 @@ pub enum Node {
     Let {
         name: Sym,
         ty: Id,
+        expr: Id,
+    },
+    Set {
+        name: Id,
         expr: Id,
     },
     Extern {
@@ -443,7 +452,10 @@ impl<'a> Parser<'a> {
 
         let sym_fn = lexer.string_interner.get_or_intern("fn");
         let sym_let = lexer.string_interner.get_or_intern("let");
+        let sym_set = lexer.string_interner.get_or_intern("set");
         let sym_ptr = lexer.string_interner.get_or_intern("ptr");
+        let sym_ref = lexer.string_interner.get_or_intern("ref");
+        let sym_load = lexer.string_interner.get_or_intern("load");
         let sym_ptrcast = lexer.string_interner.get_or_intern("ptrcast");
         let sym_store = lexer.string_interner.get_or_intern("store");
         let sym_call = lexer.string_interner.get_or_intern("call");
@@ -490,7 +502,10 @@ impl<'a> Parser<'a> {
             calls: Default::default(),
             sym_fn,
             sym_let,
+            sym_set,
             sym_ptr,
+            sym_ref,
+            sym_load,
             sym_ptrcast,
             sym_store,
             sym_call,
@@ -821,6 +836,14 @@ impl<'a> Parser<'a> {
                     let arg1 = self.parse_expression()?;
                     let range = self.expect_close_paren(start)?;
                     Ok(self.push_node(range, Node::Not(arg1)))
+                } else if sym == self.sym_ref {
+                    let expr = self.parse_expression()?;
+                    let range = self.expect_close_paren(start)?;
+                    Ok(self.push_node(range, Node::Ref(expr)))
+                } else if sym == self.sym_load {
+                    let expr = self.parse_expression()?;
+                    let range = self.expect_close_paren(start)?;
+                    Ok(self.push_node(range, Node::Load(expr)))
                 } else if sym == self.sym_ptrcast {
                     let ty = self.parse_type()?;
                     let expr = self.parse_expression()?;
@@ -890,6 +913,12 @@ impl<'a> Parser<'a> {
                     self.scope_insert(name, let_id);
                     self.local_insert(let_id);
                     Ok(let_id)
+                } else if sym == self.sym_set {
+                    let name = self.parse_symbol()?;
+                    let expr = self.parse_expression()?;
+                    let range = self.expect_close_paren(start)?;
+                    let set_id = self.push_node(range, Node::Set { name, expr });
+                    Ok(set_id)
                 } else if sym == self.sym_if {
                     self.parse_if(start)
                 } else if sym == self.sym_while {
@@ -1092,6 +1121,11 @@ impl<'a> Parser<'a> {
                 self.debug(*ty),
                 self.debug(*expr)
             ),
+            Node::Set { name, expr } => {
+                format!("(let {} {})", self.debug_sym(*name), self.debug(*expr))
+            }
+            Node::Ref(id) => format!("(ref {})", self.debug(*id)),
+            Node::Load(id) => format!("(load {})", self.debug(*id)),
             Node::PtrCast { ty, expr } => {
                 format!("(ptrcast {} {})", self.debug(*ty), self.debug(*expr))
             }

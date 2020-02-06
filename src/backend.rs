@@ -1,10 +1,12 @@
 use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 use crate::semantic::Semantic;
 
-use cranelift::codegen::ir::{FuncRef, Signature};
+use cranelift::codegen::ir::{
+    FuncRef, MemFlags, Signature, StackSlot, StackSlotData, StackSlotKind,
+};
 use cranelift::prelude::{
     types, AbiParam, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
-    Type as CraneliftType, Value as CraneliftValue, Variable,
+    Value as CraneliftValue,
 };
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
@@ -56,13 +58,18 @@ pub enum Value {
     None,
     FuncRef(Sym),
     Value(CraneliftValue),
-    Variable(Variable),
+    // todo(chad): not everything needs to a stack slot
+    // using SSA Values where possible might be more efficient
+    StackSlot(StackSlot),
+    // similar to a stackslot, but for general memory (or when the slot index isn't known, such as in a deref)
+    Address(CraneliftValue),
 }
 
 impl Value {
-    fn as_cranelift_value(&self) -> CraneliftValue {
+    fn as_addr(&self) -> Value {
         *match self {
-            Value::Value(cv) => Some(cv),
+            Value::StackSlot(ss) => Some(self),
+            Value::Address(addr) => Some(self),
             _ => None,
         }
         .unwrap()
@@ -71,6 +78,14 @@ impl Value {
     fn as_func_ref(&self) -> Sym {
         *match self {
             Value::FuncRef(fr) => Some(fr),
+            _ => None,
+        }
+        .unwrap()
+    }
+
+    fn as_value(&self) -> CraneliftValue {
+        *match self {
+            Value::Value(v) => Some(v),
             _ => None,
         }
         .unwrap()
@@ -299,6 +314,8 @@ impl<'a> Backend<'a> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
+                // println!("{}", ctx.func.display(None));
+
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
 
@@ -358,10 +375,98 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         self.local_id - 1
     }
 
-    fn resolve_value(&mut self, id: Id) -> Value {
-        match &self.values[id].clone() {
-            Value::Variable(var_id) => Value::Value(self.builder.use_var(*var_id)),
-            _ => self.values[id].clone(),
+    fn type_size(&self, id: Id) -> u32 {
+        match &self.semantic.types[id] {
+            Type::Basic(BasicType::None) => 0,
+            Type::Basic(BasicType::Bool) => 4,
+            Type::Basic(BasicType::I8) => 1,
+            Type::Basic(BasicType::I16) => 2,
+            Type::Basic(BasicType::I32) => 4,
+            Type::Basic(BasicType::I64) => 8,
+            Type::Basic(BasicType::F32) => 4,
+            Type::Basic(BasicType::F64) => 8,
+            Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
+            _ => todo!("implement type_size for non-basic types"),
+        }
+    }
+
+    fn store(&mut self, id: Id, dest: &Value) {
+        match self.values[id] {
+            Value::Value(_) => self.store_value(id, dest),
+            _ => self.store_copy(id, dest),
+        }
+    }
+
+    fn store_value(&mut self, id: Id, dest: &Value) {
+        let source_value = self.values[id].as_value();
+        match dest {
+            Value::StackSlot(slot) => {
+                self.builder.ins().stack_store(source_value, *slot, 0);
+            }
+            Value::Address(addr) => {
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), source_value, *addr, 0);
+            }
+            _ => todo!("implement store_value"),
+        }
+    }
+
+    fn store_copy(&mut self, id: Id, dest: &Value) {
+        let size = self.type_size(id);
+
+        let source_value = match &self.values[id] {
+            Value::StackSlot(slot) => {
+                self.builder
+                    .ins()
+                    .stack_addr(self.module.isa().pointer_type(), *slot, 0)
+            }
+            Value::Address(addr) => *addr,
+            _ => todo!("implement store_copy for {:?}", &self.values[id]),
+        };
+
+        let dest_value = match dest {
+            Value::StackSlot(slot) => {
+                self.builder
+                    .ins()
+                    .stack_addr(self.module.isa().pointer_type(), *slot, 0)
+            }
+            Value::Address(addr) => *addr,
+            _ => todo!("implement store_copy for {:?}", &self.values[id]),
+        };
+
+        self.builder.emit_small_memcpy(
+            self.module.isa().frontend_config(),
+            dest_value,
+            source_value,
+            size as _,
+            1,
+            1,
+        );
+    }
+
+    fn load_value(&mut self, id: Id) -> CraneliftValue {
+        self.load_value_with_type(id, id)
+    }
+
+    fn load_value_with_type(&mut self, id: Id, ty: Id) -> CraneliftValue {
+        match &self.values[id] {
+            Value::StackSlot(slot) => {
+                let ty = &self.semantic.types[ty];
+
+                self.builder
+                    .ins()
+                    .stack_load(ty.try_into().unwrap(), *slot, 0)
+            }
+            Value::Address(addr) => {
+                let ty = &self.semantic.types[ty];
+
+                self.builder
+                    .ins()
+                    .load(ty.try_into().unwrap(), MemFlags::new(), *addr, 0)
+            }
+            Value::Value(v) => *v,
+            _ => panic!("Could not get cranelift value"),
         }
     }
 
@@ -375,15 +480,28 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         match &self.semantic.parser.nodes[id] {
             Node::Return(return_id) => {
                 self.compile_id(*return_id)?;
-                let value = self.values[*return_id].clone();
-                self.builder.ins().return_(&[value.as_cranelift_value()]);
-                self.values[id] = value;
+
+                let value = self.load_value(*return_id);
+                self.values[id] = Value::Value(value);
+
+                self.builder.ins().return_(&[value]);
 
                 Ok(())
             }
             Node::IntLiteral(i) => {
-                let value = self.builder.ins().iconst(types::I64, *i);
+                let value = match self.semantic.types[id] {
+                    Type::Basic(bt) => match bt {
+                        BasicType::I64 => self.builder.ins().iconst(types::I64, *i),
+                        BasicType::I32 => self.builder.ins().iconst(types::I32, *i),
+                        BasicType::I16 => self.builder.ins().iconst(types::I16, *i),
+                        BasicType::I8 => self.builder.ins().iconst(types::I8, *i),
+                        _ => todo!("handle other type"),
+                    },
+                    _ => todo!("expected basic type"),
+                };
+
                 self.set_value(id, value);
+
                 Ok(())
             }
             Node::BoolLiteral(b) => {
@@ -398,7 +516,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Symbol(sym) => {
                 let resolved = self.semantic.scope_get(*sym, id)?;
                 self.compile_id(resolved)?;
-                self.values[id] = self.resolve_value(resolved);
+                self.values[id] = self.values[resolved].clone();
 
                 Ok(())
             }
@@ -406,28 +524,43 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 self.compile_id(*lhs)?;
                 self.compile_id(*rhs)?;
 
-                let value = self.builder.ins().iadd(
-                    self.values[*lhs].as_cranelift_value(),
-                    self.values[*rhs].as_cranelift_value(),
-                );
+                let lhs = self.load_value(*lhs);
+                let rhs = self.load_value(*rhs);
+
+                let value = self.builder.ins().iadd(lhs, rhs);
                 self.set_value(id, value);
 
                 Ok(())
             }
             Node::Let {
                 name: _, // Sym
-                ty: _,   // Id
+                ty,      // Id
                 expr,    // Id
             } => {
-                let var = Variable::with_u32(self.next_local_id());
+                let size = self.type_size(*ty);
+                let slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
 
-                self.builder
-                    .declare_var(var, get_cranelift_type(&self.semantic, id)?);
-                self.values[id] = Value::Variable(var);
+                let slot = Value::StackSlot(slot);
 
                 self.compile_id(*expr)?;
-                let val = self.resolve_value(*expr).as_cranelift_value();
-                self.builder.def_var(var, val);
+                self.store(*expr, &slot);
+
+                self.values[id] = slot;
+
+                Ok(())
+            }
+            Node::Set {
+                name, // Id
+                expr, // Id
+            } => {
+                self.compile_id(*name)?;
+                let addr = self.values[*name].as_addr();
+                self.compile_id(*expr)?;
+                self.store(*expr, &addr);
 
                 Ok(())
             }
@@ -475,11 +608,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     &self.semantic,
                     return_ty,
                 )?));
-                sig.returns.push(AbiParam::new(types::I64));
 
                 let cranelift_params = params
                     .iter()
-                    .map(|param| self.values[*param].as_cranelift_value())
+                    .map(|param| self.load_value(*param))
                     .collect::<Vec<_>>();
 
                 let sig = self.builder.import_signature(sig);
@@ -494,22 +626,22 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::If(cond_id, true_id, false_id) => {
-                let var = Variable::with_u32(self.next_local_id());
-
-                self.builder
-                    .declare_var(var, get_cranelift_type(&self.semantic, id)?);
-                self.values[id] = Value::Variable(var);
+                let size = self.type_size(id);
+                let slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
+                self.values[id] = Value::StackSlot(slot);
 
                 let true_block = self.builder.create_ebb();
                 let false_block = self.builder.create_ebb();
                 let cont_block = self.builder.create_ebb();
 
                 self.compile_id(*cond_id)?;
-                self.builder.ins().brnz(
-                    self.values[*cond_id].as_cranelift_value(),
-                    true_block,
-                    &[],
-                );
+                let cond = self.load_value(*cond_id);
+
+                self.builder.ins().brnz(cond, true_block, &[]);
                 self.builder.ins().jump(false_block, &[]);
 
                 // true
@@ -517,8 +649,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.builder.switch_to_block(true_block);
                     self.compile_id(*true_id)?;
 
-                    let resolved = self.resolve_value(*true_id).as_cranelift_value();
-                    self.builder.def_var(var, resolved);
+                    self.store(*true_id, &Value::StackSlot(slot));
 
                     self.builder.ins().jump(cont_block, &[]);
                 }
@@ -528,13 +659,35 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.builder.switch_to_block(false_block);
                     self.compile_id(false_id.unwrap())?;
 
-                    let resolved = self.resolve_value(false_id.unwrap()).as_cranelift_value();
-                    self.builder.def_var(var, resolved);
+                    self.store(false_id.unwrap(), &Value::StackSlot(slot));
 
                     self.builder.ins().jump(cont_block, &[]);
                 }
 
                 self.builder.switch_to_block(cont_block);
+
+                Ok(())
+            }
+            Node::Ref(ref_id) => {
+                self.compile_id(*ref_id)?;
+                let slot = match self.values[*ref_id] {
+                    Value::StackSlot(ss) => Some(ss),
+                    _ => None,
+                }
+                .unwrap();
+
+                self.values[id] = Value::Value(self.builder.ins().stack_addr(
+                    self.module.isa().pointer_type(),
+                    slot,
+                    0,
+                ));
+
+                Ok(())
+            }
+            Node::Load(load_id) => {
+                self.compile_id(*load_id)?;
+                let addr = self.load_value_with_type(*load_id, id);
+                self.values[id] = Value::Address(addr);
 
                 Ok(())
             }
@@ -557,12 +710,15 @@ impl TryInto<types::Type> for &Type {
         match self {
             &Type::Basic(bt) => match bt {
                 BasicType::Bool => Ok(types::I32), // todo(chad): I8?
+                BasicType::I8 => Ok(types::I8),
+                BasicType::I16 => Ok(types::I16),
                 BasicType::I32 => Ok(types::I32),
                 BasicType::I64 => Ok(types::I64),
                 BasicType::F32 => Ok(types::F32),
                 BasicType::F64 => Ok(types::F64),
                 _ => Err("Could not convert type"),
             },
+            &Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
             _ => Err("Could not convert type"),
         }
     }

@@ -1,6 +1,9 @@
 #[macro_use]
 extern crate lazy_static;
 
+#[macro_use(defer)]
+extern crate scopeguard;
+
 mod backend;
 mod parser;
 mod semantic;
@@ -9,33 +12,29 @@ use backend::Backend;
 
 fn main() {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
-    let backend = Backend::bootstrap_from_source(&source)
+    let mut backend = Backend::bootstrap_from_source(&source)
         .map_err(|e| panic!("Error bootstrapping from source: {:?}", e))
         .unwrap();
     dbg!(backend.call_func("main"));
 
-    // backend
-    //     .update_source(
-    //         "
-    // (fn foo () i64
-    //     (return (+ 101 (call baz))))
-
+    //     backend
+    //         .update_source(
+    //             "
     // (fn main () i64
-    //     (return (+ (call bar) 1)))
+    //     (let a bool (call bar))
+    //     (let b i64 (if a 3 5))
+    //     (return b))
 
-    // (fn baz () i64
-    //     (return 1))
-
-    // (fn bar () i64
-    //     (return (+ 1 (call foo))))
+    // (fn bar () bool
+    //     (return false))
     //     ",
-    //     )
-    //     .map_err(|e| panic!("Error bootstrapping from source: {:?}", e))
-    //     .unwrap();
+    //         )
+    //         .map_err(|e| panic!("Error bootstrapping from source: {:?}", e))
+    //         .unwrap();
 
-    // backend
-    //     .recompile_function("foo")
-    //     .map_err(|e| panic!("Error recompiling function: {:?}", e))
-    //     .unwrap();
-    // dbg!(backend.call_func("main"));
+    //     backend
+    //         .recompile_function("bar")
+    //         .map_err(|e| panic!("Error recompiling function: {:?}", e))
+    //         .unwrap();
+    //     dbg!(backend.call_func("main"));
 }
