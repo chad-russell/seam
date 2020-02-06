@@ -2,5 +2,5 @@
     (let a i64 8)
     (let b (ptr i64) (ref a))
     (let c (ptr (ptr i64)) (ref b))
-    (let d i64 (load (load c)))
+    (let d i64 (load (load (load c))))
     (return d))
