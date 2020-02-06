@@ -5,7 +5,7 @@ use cranelift::codegen::ir::{
     FuncRef, MemFlags, Signature, StackSlot, StackSlotData, StackSlotKind,
 };
 use cranelift::prelude::{
-    types, AbiParam, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
+    types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
 };
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
@@ -304,6 +304,7 @@ impl<'a> Backend<'a> {
                     values: &mut self.values,
                     builder: &mut builder,
                     local_id: 0,
+                    current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
                     module: &mut module,
                 };
@@ -360,6 +361,7 @@ struct FunctionBackend<'a, 'b, 'c> {
     semantic: &'a Semantic<'b>,
     values: &'a mut Vec<Value>,
     builder: &'a mut Builder<'c>,
+    current_block: Ebb,
     local_id: u32,
     dynamic_fn_ptr_decl: FuncRef,
     module: &'a mut Module<SimpleJITBackend>,
@@ -647,6 +649,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 // true
                 {
                     self.builder.switch_to_block(true_block);
+                    self.current_block = true_block;
                     self.compile_id(*true_id)?;
 
                     self.store(*true_id, &Value::StackSlot(slot));
@@ -657,6 +660,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 // false
                 if false_id.is_some() {
                     self.builder.switch_to_block(false_block);
+                    self.current_block = false_block;
                     self.compile_id(false_id.unwrap())?;
 
                     self.store(false_id.unwrap(), &Value::StackSlot(slot));
@@ -665,6 +669,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 }
 
                 self.builder.switch_to_block(cont_block);
+                self.current_block = cont_block;
 
                 Ok(())
             }
@@ -689,6 +694,15 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let addr = self.load_value_with_type(*load_id, id);
                 self.values[id] = Value::Address(addr);
 
+                Ok(())
+            }
+            Node::FuncParam {
+                name: _, // Sym
+                ty: _,   // Id
+                index,   // u16
+            } => {
+                let params = self.builder.ebb_params(self.current_block);
+                self.values[id] = Value::Value(params[*index as usize]);
                 Ok(())
             }
             Node::TypeLiteral(_) => {
