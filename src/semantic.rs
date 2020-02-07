@@ -3,6 +3,7 @@ use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 type Sym = usize;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy)]
@@ -105,13 +106,14 @@ impl<'a> Semantic<'a> {
                 self.types[id] = Type::String;
                 Ok(())
             }
-            Node::Let { name, ty, expr } => {
-                self.parser.scope_insert(*name, id);
-
+            Node::Let { name: _, ty, expr } => {
                 self.assign_type(*ty, Coercion::None)?;
-                self.assign_type(*expr, Coercion::Id(*ty))?;
+                if expr.is_some() {
+                    self.assign_type(expr.unwrap(), Coercion::Id(*ty))?;
+                }
 
-                self.types[id] = self.types[*expr].clone();
+                self.types[id] = self.types[*ty].clone();
+
                 Ok(())
             }
             Node::Set { name, expr } => {
@@ -120,6 +122,54 @@ impl<'a> Semantic<'a> {
 
                 self.types[id] = self.types[*expr].clone();
                 Ok(())
+            }
+            Node::Store { ptr, expr } => {
+                self.assign_type(*ptr, Coercion::None)?;
+                let ptr_ty = match &self.types[*ptr] {
+                    Type::Pointer(ptr_ty) => Ok(*ptr_ty),
+                    _ => Err(CompileError::from_string(
+                        "Expected pointer type",
+                        self.parser.ranges[*ptr],
+                    )),
+                }?;
+
+                self.assign_type(*expr, Coercion::Id(ptr_ty))?;
+
+                self.types[id] = self.types[*ptr].clone();
+
+                Ok(())
+            }
+            Node::Field {
+                base,
+                field_name,
+                field_index: _,
+            } => {
+                self.assign_type(*base, Coercion::None)?;
+
+                let params = self.types[*base]
+                    .as_struct_params()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (ty, name))| (name, (*ty, index as u16)))
+                    .collect::<BTreeMap<_, _>>();
+
+                match params.get(field_name) {
+                    Some((ty, index)) => {
+                        // set the field index
+                        match &mut self.parser.nodes[id] {
+                            Node::Field { field_index, .. } => *field_index = *index,
+                            _ => unreachable!(),
+                        }
+
+                        self.types[id] = self.types[*ty].clone();
+                        Ok(())
+                    }
+                    _ => Err(CompileError::from_string(
+                        "field not found",
+                        self.parser.ranges[id],
+                    )),
+                }
             }
             Node::Add(arg1, arg2)
             | Node::Sub(arg1, arg2)
@@ -238,24 +288,6 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            // Node::Store {
-            //     ptr,  // : Id,
-            //     expr, // : Id,
-            // } => {
-            //     // type of name
-            //     // type of expr, using type of name as coercion
-            //     self.assign_type(*ptr)?;
-
-            //     let resolved_ty = match &self.types[*ptr] {
-            //         Type::Pointer(p) => Ok(self.types[*p].clone()),
-            //         _ => Err(CompileError::from_string(format!("expected to store into a pointer, not a {:?}", &self.types[*ptr]), self.parser.ranges[id]))
-            //     }?;
-
-            //     self.assign_type(*expr)?;
-            //     self.types[id] =  resolved_ty;
-
-            //     Ok(())
-            // }
             Node::Ref(ref_id) => {
                 // todo(chad): coercion
                 self.assign_type(*ref_id, Coercion::None)?;
@@ -278,21 +310,10 @@ impl<'a> Semantic<'a> {
                     )),
                 }
             }
-            // Node::PtrCast { ty, expr } => {
-            //     self.assign_type(*ty)?;
-            //     self.assign_type(*expr)?;
-            //     match &self.types[*expr] {
-            //         Type::Pointer(_) => {
-            //             self.types[id] =  Type::Pointer(*ty);
-            //             Ok(())
-            //         }
-            //         _ => Err(CompileError::from_string("Cannot ptr-cast a non-ptr", self.parser.ranges[*expr]))
-            //     }
-            // }
             Node::TypeLiteral(ty) => {
                 match ty {
                     Type::Basic(_) => {
-                        self.types[id] = ty.clone().into();
+                        self.types[id] = ty.clone();
                     }
                     Type::Pointer(ty) => {
                         self.assign_type(*ty, Coercion::None)?;
@@ -310,7 +331,14 @@ impl<'a> Semantic<'a> {
                             self.assign_type(input_ty, Coercion::None)?;
                         }
 
-                        self.types[id] = ty.clone().into();
+                        self.types[id] = ty.clone();
+                    }
+                    Type::Struct(params) => {
+                        for (ty, name) in params {
+                            self.assign_type(*ty, Coercion::None)?;
+                        }
+
+                        self.types[id] = ty.clone();
                     }
                     Type::Unassigned => unreachable!(),
                 }
@@ -360,23 +388,22 @@ impl<'a> Semantic<'a> {
                     Ok(())
                 }
             }
-            // Node::Extern {
-            //     name: _,   // Sym,
-            //     params,    // Vec<Id>,
-            //     return_ty, // Id,
-            // } => {
-            //     for &input in params.iter() {
-            //         self.assign_type(input, Coercion::None)?;
-            //     }
-            //     self.assign_type(*return_ty, Coercion::None)?;
+            Node::Struct { name: _, params } => {
+                for param in params {
+                    self.assign_type(*param, Coercion::None)?;
+                }
+                self.types[id] = Type::Struct(
+                    params
+                        .iter()
+                        .map(|p| {
+                            let param = self.parser.nodes[*p].param_field_name().unwrap();
+                            (*p, param)
+                        })
+                        .collect(),
+                );
 
-            //     self.types[id] = Type::Func {
-            //         return_ty: *return_ty,
-            //         input_tys: params.clone(),
-            //     };
-
-            //     Ok(())
-            // }
+                Ok(())
+            }
             _ => Err(CompileError::from_string(
                 format!(
                     "Cannot coerce type for AST node {:?}",
@@ -387,58 +414,12 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    // fn types_match_id(&self, ty1: Id, ty2: Id) -> bool {
-    //     let ty1 = self.types[ty1].clone();
-    //     let ty2 = self.types[ty2].clone();
-    //     self.types_match_ty(&ty1, &ty2)
-    // }
-
     fn types_match_ty(&self, ty1: &Type, ty2: &Type) -> bool {
         match (ty1, ty2) {
             (Type::Pointer(pt1), Type::Pointer(pt2)) => self.types[*pt1] == self.types[*pt2],
             _ => ty1 == ty2,
         }
     }
-
-    // fn coerce(&self, ty: Type, coercion: Coercion, range: &Range) -> Result<Type, CompileError> {
-    //     let coercion = match coercion {
-    //         Coercion::None => {
-    //             return Ok(ty);
-    //         }
-    //         Coercion::Id(id) => self.types[id].clone(),
-    //         Coercion::Basic(bt) => Type::Basic(bt),
-    //     };
-
-    //     let err = Err(CompileError::from_string(
-    //         format!("Incompatible types: {:?} and {:?}", ty, coercion),
-    //         *range,
-    //     ));
-
-    //     match (ty, coercion) {
-    //         (Type::Basic(btt), Type::Basic(btc)) => match (btt, btc) {
-    //             (BasicType::None, btc) => Ok(Type::Basic(btc)),
-    //             (btt, BasicType::None) => Ok(Type::Basic(btt)),
-    //             (BasicType::Bool, BasicType::Bool) => Ok(Type::Basic(BasicType::Bool)),
-    //             (BasicType::I8, BasicType::I8) => Ok(Type::Basic(BasicType::I8)),
-    //             (BasicType::I8, BasicType::I16) => Ok(Type::Basic(BasicType::I16)),
-    //             (BasicType::I8, BasicType::I32) => Ok(Type::Basic(BasicType::I32)),
-    //             (BasicType::I8, BasicType::I64) => Ok(Type::Basic(BasicType::I64)),
-    //             (BasicType::I16, BasicType::I16) => Ok(Type::Basic(BasicType::I16)),
-    //             (BasicType::I16, BasicType::I32) => Ok(Type::Basic(BasicType::I32)),
-    //             (BasicType::I16, BasicType::I64) => Ok(Type::Basic(BasicType::I64)),
-    //             (BasicType::I32, BasicType::I32) => Ok(Type::Basic(BasicType::I32)),
-    //             (BasicType::I32, BasicType::I64) => Ok(Type::Basic(BasicType::I64)),
-    //             (BasicType::I64, BasicType::I64) => Ok(Type::Basic(BasicType::I64)),
-    //             _ => err,
-    //         },
-    //         (Type::String, Type::String) => Ok(Type::String),
-    //         (Type::Unassigned, coercion) => Ok(coercion),
-    //         (ty, Type::Unassigned) => Ok(ty),
-    //         (Type::Pointer(_), Type::Pointer(_)) => todo!("handle pointer type coercion"),
-    //         (Type::Func { .. }, Type::Func { .. }) => todo!("handle func type coercion"),
-    //         _ => err,
-    //     }
-    // }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {
         self.parser

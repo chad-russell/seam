@@ -62,17 +62,18 @@ pub enum Value {
     // using SSA Values where possible might be more efficient
     StackSlot(StackSlot),
     // similar to a stackslot, but for general memory (or when the slot index isn't known, such as in a deref)
-    Address(CraneliftValue),
+    Address(CraneliftValue, u32),
 }
 
 impl Value {
     fn as_addr(&self) -> Value {
-        *match self {
-            Value::StackSlot(ss) => Some(self),
-            Value::Address(addr) => Some(self),
+        match self {
+            Value::StackSlot(_) => Some(self),
+            Value::Address(_, _) => Some(self),
             _ => None,
         }
         .unwrap()
+        .clone()
     }
 
     fn as_func_ref(&self) -> Sym {
@@ -168,7 +169,6 @@ impl<'a> Backend<'a> {
                 Node::Func { name, .. } => {
                     // set the value to come from the FUNC_PTRS map
                     // Some(FUNC_PTRS.lock().unwrap().get(&name).unwrap())
-                    // println!("inserting {} as funcref", topo);
                     self.values[topo] = Value::FuncRef(name);
                 }
                 _ => {}
@@ -303,7 +303,6 @@ impl<'a> Backend<'a> {
                     semantic: &self.semantic,
                     values: &mut self.values,
                     builder: &mut builder,
-                    local_id: 0,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
                     module: &mut module,
@@ -315,12 +314,11 @@ impl<'a> Backend<'a> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                // println!("{}", ctx.func.display(None));
+                println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
 
-                // println!("inserting {} as funcref", id);
                 self.values[id] = Value::FuncRef(func_sym);
 
                 module.finalize_definitions();
@@ -362,7 +360,6 @@ struct FunctionBackend<'a, 'b, 'c> {
     values: &'a mut Vec<Value>,
     builder: &'a mut Builder<'c>,
     current_block: Ebb,
-    local_id: u32,
     dynamic_fn_ptr_decl: FuncRef,
     module: &'a mut Module<SimpleJITBackend>,
 }
@@ -370,11 +367,6 @@ struct FunctionBackend<'a, 'b, 'c> {
 impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     fn set_value(&mut self, id: Id, value: CraneliftValue) {
         self.values[id] = Value::Value(value);
-    }
-
-    fn next_local_id(&mut self) -> u32 {
-        self.local_id += 1;
-        self.local_id - 1
     }
 
     fn type_size(&self, id: Id) -> u32 {
@@ -388,7 +380,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Type::Basic(BasicType::F32) => 4,
             Type::Basic(BasicType::F64) => 8,
             Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
-            _ => todo!("implement type_size for non-basic types"),
+            Type::Struct(params) => params.iter().map(|(p, _)| self.type_size(*p)).sum(),
+            _ => todo!("type_size"),
         }
     }
 
@@ -405,12 +398,17 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Value::StackSlot(slot) => {
                 self.builder.ins().stack_store(source_value, *slot, 0);
             }
-            Value::Address(addr) => {
+            Value::Value(value) => {
                 self.builder
                     .ins()
-                    .store(MemFlags::new(), source_value, *addr, 0);
+                    .store(MemFlags::new(), source_value, *value, 0);
             }
-            _ => todo!("implement store_value"),
+            Value::Address(addr, offset) => {
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), source_value, *addr, *offset as i32);
+            }
+            _ => todo!("store_value"),
         }
     }
 
@@ -423,8 +421,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .ins()
                     .stack_addr(self.module.isa().pointer_type(), *slot, 0)
             }
-            Value::Address(addr) => *addr,
-            _ => todo!("implement store_copy for {:?}", &self.values[id]),
+            Value::Address(addr, offset) => {
+                let offset = self.builder.ins().iconst(types::I64, *offset as i64);
+                self.builder.ins().iadd(*addr, offset)
+            }
+            _ => todo!("store_copy for {:?}", &self.values[id]),
         };
 
         let dest_value = match dest {
@@ -433,8 +434,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .ins()
                     .stack_addr(self.module.isa().pointer_type(), *slot, 0)
             }
-            Value::Address(addr) => *addr,
-            _ => todo!("implement store_copy for {:?}", &self.values[id]),
+            Value::Address(addr, offset) => {
+                let offset = self.builder.ins().iconst(types::I64, *offset as i64);
+                self.builder.ins().iadd(*addr, offset)
+            }
+            _ => todo!("store_copy for {:?}", dest),
         };
 
         self.builder.emit_small_memcpy(
@@ -452,21 +456,20 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn load_value_with_type(&mut self, id: Id, ty: Id) -> CraneliftValue {
+        let ty = &self.semantic.types[ty];
+
         match &self.values[id] {
             Value::StackSlot(slot) => {
-                let ty = &self.semantic.types[ty];
-
                 self.builder
                     .ins()
                     .stack_load(ty.try_into().unwrap(), *slot, 0)
             }
-            Value::Address(addr) => {
-                let ty = &self.semantic.types[ty];
-
-                self.builder
-                    .ins()
-                    .load(ty.try_into().unwrap(), MemFlags::new(), *addr, 0)
-            }
+            Value::Address(addr, offset) => self.builder.ins().load(
+                ty.try_into().unwrap(),
+                MemFlags::new(),
+                *addr,
+                *offset as i32,
+            ),
             Value::Value(v) => *v,
             _ => panic!("Could not get cranelift value"),
         }
@@ -548,8 +551,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 let slot = Value::StackSlot(slot);
 
-                self.compile_id(*expr)?;
-                self.store(*expr, &slot);
+                if expr.is_some() {
+                    self.compile_id(expr.unwrap())?;
+                    self.store(expr.unwrap(), &slot);
+                }
 
                 self.values[id] = slot;
 
@@ -561,7 +566,26 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             } => {
                 self.compile_id(*name)?;
                 let addr = self.values[*name].as_addr();
+
                 self.compile_id(*expr)?;
+                self.store(*expr, &addr);
+
+                Ok(())
+            }
+            Node::Store { ptr, expr } => {
+                self.compile_id(*ptr)?;
+                self.compile_id(*expr)?;
+
+                let addr = match &self.values[*ptr] {
+                    Value::StackSlot(slot) => Value::Value(self.builder.ins().stack_load(
+                        self.module.isa().pointer_type(),
+                        *slot,
+                        0,
+                    )),
+                    Value::Address(_, _) => self.values[id],
+                    _ => panic!("Could not get cranelift value: got {:?}", &self.values[id]),
+                };
+
                 self.store(*expr, &addr);
 
                 Ok(())
@@ -675,24 +699,24 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             }
             Node::Ref(ref_id) => {
                 self.compile_id(*ref_id)?;
-                let slot = match self.values[*ref_id] {
-                    Value::StackSlot(ss) => Some(ss),
-                    _ => None,
-                }
-                .unwrap();
-
-                self.values[id] = Value::Value(self.builder.ins().stack_addr(
-                    self.module.isa().pointer_type(),
-                    slot,
-                    0,
-                ));
+                match self.values[*ref_id] {
+                    Value::StackSlot(slot) => {
+                        self.values[id] = Value::Value(self.builder.ins().stack_addr(
+                            self.module.isa().pointer_type(),
+                            slot,
+                            0,
+                        ));
+                    }
+                    Value::Address(addr, offset) => self.values[id] = Value::Address(addr, offset),
+                    _ => todo!(),
+                };
 
                 Ok(())
             }
             Node::Load(load_id) => {
                 self.compile_id(*load_id)?;
                 let addr = self.load_value_with_type(*load_id, id);
-                self.values[id] = Value::Address(addr);
+                self.values[id] = Value::Address(addr, 0);
 
                 Ok(())
             }
@@ -703,6 +727,41 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             } => {
                 let params = self.builder.ebb_params(self.current_block);
                 self.values[id] = Value::Value(params[*index as usize]);
+                Ok(())
+            }
+            Node::Field {
+                base,
+                field_name: _,
+                field_index,
+            } => {
+                self.compile_id(*base)?;
+
+                let offset = self.semantic.types[*base]
+                    .as_struct_params()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(_index, (ty, _name))| *ty)
+                    .take(*field_index as usize)
+                    .map(|ty| self.type_size(ty))
+                    .sum::<u32>();
+
+                // let offset = self.builder.ins().iconst(types::I64, offset as i64);
+
+                let (base, offset) = match &self.values[*base] {
+                    Value::StackSlot(slot) => {
+                        let base = self.builder.ins().stack_addr(
+                            self.module.isa().pointer_type(),
+                            *slot,
+                            0,
+                        );
+                        (base, offset)
+                    }
+                    Value::Address(base, o) => (*base, offset + o),
+                    _ => unreachable!(),
+                };
+                self.values[id] = Value::Address(base, offset);
+
                 Ok(())
             }
             Node::TypeLiteral(_) => {

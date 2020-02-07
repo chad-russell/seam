@@ -58,6 +58,16 @@ pub enum Type {
     Pointer(Id),
     String,
     Func { return_ty: Id, input_tys: Vec<Id> },
+    Struct(Vec<(Id, Sym)>),
+}
+
+impl Type {
+    pub fn as_struct_params(&self) -> Option<&Vec<(Id, Sym)>> {
+        match self {
+            Type::Struct(params) => Some(params),
+            _ => None,
+        }
+    }
 }
 
 impl Into<Type> for BasicType {
@@ -296,7 +306,10 @@ pub struct Parser<'a> {
     pub calls: Vec<(Id, usize)>,
 
     sym_fn: Sym,
+    sym_struct: Sym,
+    sym_field: Sym,
     sym_let: Sym,
+    sym_uninit: Sym,
     sym_set: Sym,
     sym_store: Sym,
     sym_ptr: Sym,
@@ -363,6 +376,11 @@ pub enum Node {
     BoolLiteral(bool),
     StringLiteral(String),
     TypeLiteral(Type),
+    Field {
+        base: Id,
+        field_name: Sym,
+        field_index: u16,
+    },
     Return(Id),
     Ref(Id),
     Load(Id),
@@ -377,7 +395,7 @@ pub enum Node {
     Let {
         name: Sym,
         ty: Id,
-        expr: Id,
+        expr: Option<Id>,
     },
     Set {
         name: Id,
@@ -399,6 +417,10 @@ pub enum Node {
         name: Sym,
         ty: Id,
         index: u16,
+    },
+    Struct {
+        name: Sym,
+        params: Vec<Id>,
     },
     Call {
         name: Id,
@@ -434,9 +456,16 @@ impl TryInto<Type> for Node {
 }
 
 impl Node {
-    fn as_symbol(&self) -> Option<Sym> {
+    pub fn as_symbol(&self) -> Option<Sym> {
         match self {
             Node::Symbol(sym) => Some(*sym),
+            _ => None,
+        }
+    }
+
+    pub fn param_field_name(&self) -> Option<Sym> {
+        match self {
+            Node::FuncParam { name, ty, index } => Some(*name),
             _ => None,
         }
     }
@@ -451,7 +480,10 @@ impl<'a> Parser<'a> {
         lexer.pop();
 
         let sym_fn = lexer.string_interner.get_or_intern("fn");
+        let sym_struct = lexer.string_interner.get_or_intern("struct");
+        let sym_field = lexer.string_interner.get_or_intern("field");
         let sym_let = lexer.string_interner.get_or_intern("let");
+        let sym_uninit = lexer.string_interner.get_or_intern("uninit");
         let sym_set = lexer.string_interner.get_or_intern("set");
         let sym_ptr = lexer.string_interner.get_or_intern("ptr");
         let sym_ref = lexer.string_interner.get_or_intern("ref");
@@ -501,7 +533,10 @@ impl<'a> Parser<'a> {
             top_level_map: Default::default(),
             calls: Default::default(),
             sym_fn,
+            sym_struct,
+            sym_field,
             sym_let,
+            sym_uninit,
             sym_set,
             sym_ptr,
             sym_ref,
@@ -673,13 +708,14 @@ impl<'a> Parser<'a> {
                 } else if sym == self.sym_string {
                     Ok(self.push_node(range, Node::TypeLiteral(Type::String)))
                 } else {
-                    Err(CompileError::from_string(
-                        format!(
-                            "Unrecognized type {}",
-                            self.lexer.string_interner.resolve(sym).unwrap(),
-                        ),
-                        self.lexer.top.range,
-                    ))
+                    Ok(ident)
+                    // Err(CompileError::from_string(
+                    //     format!(
+                    //         "Unrecognized type {}",
+                    //         self.lexer.string_interner.resolve(sym).unwrap(),
+                    //     ),
+                    //     self.lexer.top.range,
+                    // ))
                 }
             }
             _ => Err(CompileError::from_string(
@@ -854,6 +890,19 @@ impl<'a> Parser<'a> {
                 } else if sym == self.sym_call {
                     let name = self.parse_symbol()?;
                     self.parse_call(start, name)
+                } else if sym == self.sym_field {
+                    let base = self.parse_expression()?;
+                    let field_name = self.parse_sym()?;
+                    let range = self.expect_close_paren(start)?;
+
+                    Ok(self.push_node(
+                        range,
+                        Node::Field {
+                            base,
+                            field_name,
+                            field_index: 0,
+                        },
+                    ))
                 } else {
                     Err(CompileError::from_string(
                         "Unexpected",
@@ -907,14 +956,23 @@ impl<'a> Parser<'a> {
                 if sym == self.sym_let {
                     let name = self.parse_sym()?;
                     let ty = self.parse_type()?;
-                    let expr = self.parse_expression()?;
+
+                    let expr = match self.lexer.top.tok {
+                        Token::Symbol(sym) if sym == self.sym_uninit => {
+                            self.lexer.pop(); // pop 'uninit' token
+                            None
+                        }
+                        _ => Some(self.parse_expression()?),
+                    };
+
                     let range = self.expect_close_paren(start)?;
                     let let_id = self.push_node(range, Node::Let { name, ty, expr });
                     self.scope_insert(name, let_id);
                     self.local_insert(let_id);
+
                     Ok(let_id)
                 } else if sym == self.sym_set {
-                    let name = self.parse_symbol()?;
+                    let name = self.parse_expression()?;
                     let expr = self.parse_expression()?;
                     let range = self.expect_close_paren(start)?;
                     let set_id = self.push_node(range, Node::Set { name, expr });
@@ -960,18 +1018,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_func(&mut self, start: Location) -> Result<Id, CompileError> {
-        let name = self.parse_sym()?;
-
-        // open a new scope
-        self.scopes.push(Scope::new(self.top_scope));
-
-        let old_top_scope = self.top_scope;
-        self.top_scope = self.scopes.len() - 1;
-
+    fn parse_params(&mut self) -> Result<Vec<Id>, CompileError> {
         let mut params = Vec::new();
         let params_start = self.lexer.top.range.start;
-        self.expect(&Token::OpenParen)?;
+
         let mut index = 0;
         while self.lexer.top.tok != Token::CloseParen {
             let input_start = self.lexer.top.range.start;
@@ -997,6 +1047,22 @@ impl<'a> Parser<'a> {
 
             index += 1;
         }
+
+        Ok(params)
+    }
+
+    fn parse_func(&mut self, start: Location) -> Result<Id, CompileError> {
+        let name = self.parse_sym()?;
+
+        // open a new scope
+        self.scopes.push(Scope::new(self.top_scope));
+
+        let old_top_scope = self.top_scope;
+        self.top_scope = self.scopes.len() - 1;
+
+        let params_start = self.lexer.top.range.start;
+        self.expect(&Token::OpenParen)?;
+        let params = self.parse_params()?;
         self.expect_close_paren(params_start)?;
 
         let return_ty = self.parse_type()?;
@@ -1039,6 +1105,16 @@ impl<'a> Parser<'a> {
                 let sym = self.parse_sym()?;
                 if sym == self.sym_fn {
                     self.parse_func(start)
+                } else if sym == self.sym_struct {
+                    let name = self.parse_sym()?;
+                    let params = self.parse_params()?;
+                    let range = self.expect_close_paren(start)?;
+
+                    let id = self.push_node(range, Node::Struct { name, params });
+
+                    self.scope_insert(name, id);
+
+                    Ok(id)
                 } else if sym == self.sym_extern {
                     let name = self.parse_sym()?;
 
@@ -1119,12 +1195,23 @@ impl<'a> Parser<'a> {
                 "(let {} {} {})",
                 self.debug_sym(*name),
                 self.debug(*ty),
-                self.debug(*expr)
+                if expr.is_some() {
+                    self.debug(expr.unwrap())
+                } else {
+                    String::from("uninit")
+                }
             ),
             Node::Set { name, expr } => {
-                format!("(let {} {})", self.debug_sym(*name), self.debug(*expr))
+                format!("(set {} {})", self.debug_sym(*name), self.debug(*expr))
             }
             Node::Ref(id) => format!("(ref {})", self.debug(*id)),
+            Node::Field {
+                base, field_name, ..
+            } => format!(
+                "(field {} {})",
+                self.debug(*base),
+                self.debug_sym(*field_name)
+            ),
             Node::Load(id) => format!("(load {})", self.debug(*id)),
             Node::PtrCast { ty, expr } => {
                 format!("(ptrcast {} {})", self.debug(*ty), self.debug(*expr))
@@ -1132,13 +1219,18 @@ impl<'a> Parser<'a> {
             Node::Func {
                 name,
                 scope: _,
-                params: _,
+                params,
                 return_ty,
                 stmts,
             } => {
                 let mut d = format!(
-                    "(fn {} () {} ",
+                    "(fn {} ({}) {} ",
                     self.debug_sym(*name),
+                    params
+                        .iter()
+                        .map(|p| self.debug(*p))
+                        .collect::<Vec<_>>()
+                        .join(","),
                     self.debug(*return_ty)
                 );
                 for bb in stmts {
@@ -1148,14 +1240,28 @@ impl<'a> Parser<'a> {
                 d += ")";
                 d
             }
+            Node::Struct { name, params } => format!(
+                "(struct {} ({}))",
+                self.debug_sym(*name),
+                params
+                    .iter()
+                    .map(|p| self.debug(*p))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Node::Extern {
                 name,
-                params: _,
+                params,
                 return_ty,
             } => {
                 let mut d = format!(
-                    "(fn {} () {} ",
+                    "(extern {} ({}) {} ",
                     self.debug_sym(*name),
+                    params
+                        .iter()
+                        .map(|p| self.debug(*p))
+                        .collect::<Vec<_>>()
+                        .join(","),
                     self.debug(*return_ty)
                 );
                 d += ")";
