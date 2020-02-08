@@ -386,26 +386,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn store(&mut self, id: Id, dest: &Value) {
-        // match &self.semantic.types[id] {
-        //     Type::Struct(_) => {
-        //         // dest will always be a pointer to the struct in this case
-        //         self.store_copy(id, dest);
-        //     }
-        //     _ => {
-        //         if self.semantic.parser.node_has_slot[id] {
-        //             self.store_copy(id, dest);
-        //         } else {
-        //             self.store_value(id, dest);
-        //         }
-        //     }
-        // }
-
-        let is_struct = match &self.semantic.types[id] {
-            Type::Struct(_) => true,
-            _ => false,
-        };
-
-        if self.semantic.parser.node_has_slot[id] || is_struct {
+        if self.semantic.parser.node_has_slot[id] {
             self.store_copy(id, dest);
         } else {
             self.store_value(id, dest);
@@ -426,6 +407,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             }
             _ => todo!("store_value source for {:?}", &self.values[id]),
         };
+        // let source_value = self.rvalue(id);
 
         match dest {
             Value::StackSlot(slot) => {
@@ -486,27 +468,33 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         );
     }
 
-    fn load_value(&mut self, id: Id) -> CraneliftValue {
-        self.load_value_with_type(id, id)
-    }
+    fn rvalue(&mut self, id: Id) -> CraneliftValue {
+        let has_slot = self.semantic.parser.node_has_slot[id];
 
-    fn load_value_with_type(&mut self, id: Id, ty: Id) -> CraneliftValue {
-        let ty = &self.semantic.types[ty];
+        // println!(
+        //     "{:?} has slot? {}",
+        //     &self.semantic.parser.nodes[id], has_slot
+        // );
 
-        let ty = match ty {
-            Type::Struct(_) => self.module.isa().pointer_type(),
-            _ => ty.try_into().unwrap(),
-        };
+        if has_slot {
+            let ty = &self.semantic.types[id];
+            let ty = match ty {
+                Type::Struct(_) => self.module.isa().pointer_type(),
+                _ => ty.try_into().unwrap(),
+            };
 
-        match &self.values[id] {
-            Value::StackSlot(slot) => self.builder.ins().stack_load(ty, *slot, 0),
-            Value::Address(addr, offset) => {
-                self.builder
-                    .ins()
-                    .load(ty, MemFlags::new(), *addr, *offset as i32)
+            match &self.values[id] {
+                Value::StackSlot(slot) => self.builder.ins().stack_load(ty, *slot, 0),
+                Value::Address(addr, offset) => {
+                    self.builder
+                        .ins()
+                        .load(ty, MemFlags::new(), *addr, *offset as i32)
+                }
+                Value::Value(v) => self.builder.ins().load(ty, MemFlags::new(), *v, 0),
+                _ => panic!("Could not get cranelift value: {:?}", &self.values[id]),
             }
-            Value::Value(v) => self.builder.ins().load(ty, MemFlags::new(), *v, 0),
-            _ => panic!("Could not get cranelift value: {:?}", &self.values[id]),
+        } else {
+            self.values[id].as_value()
         }
     }
 
@@ -521,7 +509,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Return(return_id) => {
                 self.compile_id(*return_id)?;
 
-                let value = self.load_value(*return_id);
+                let value = self.rvalue(*return_id);
                 self.values[id] = Value::Value(value);
 
                 self.builder.ins().return_(&[value]);
@@ -564,8 +552,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 self.compile_id(*lhs)?;
                 self.compile_id(*rhs)?;
 
-                let lhs = self.load_value(*lhs);
-                let rhs = self.load_value(*rhs);
+                let lhs = self.rvalue(*lhs);
+                let rhs = self.rvalue(*rhs);
 
                 let value = self.builder.ins().iadd(lhs, rhs);
                 self.set_value(id, value);
@@ -672,7 +660,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 let cranelift_params = params
                     .iter()
-                    .map(|param| self.load_value(*param))
+                    .map(|param| self.rvalue(*param))
                     .collect::<Vec<_>>();
 
                 let sig = self.builder.import_signature(sig);
@@ -700,7 +688,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let cont_block = self.builder.create_ebb();
 
                 self.compile_id(*cond_id)?;
-                let cond = self.load_value(*cond_id);
+                let cond = self.rvalue(*cond_id);
 
                 self.builder.ins().brnz(cond, true_block, &[]);
                 self.builder.ins().jump(false_block, &[]);
@@ -751,8 +739,30 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Load(load_id) => {
                 self.compile_id(*load_id)?;
 
-                let value = self.load_value_with_type(*load_id, id);
-                self.set_value(id, value);
+                let (mut value, mut offset) = match &self.values[*load_id] {
+                    Value::Address(addr, offset) => (*addr, *offset),
+                    Value::Value(value) => (*value, 0),
+                    Value::StackSlot(slot) => (
+                        self.builder
+                            .ins()
+                            .stack_addr(self.module.isa().pointer_type(), *slot, 0),
+                        0,
+                    ),
+                    _ => todo!("load for {:?}", &self.values[*load_id]),
+                };
+
+                let ty = &self.semantic.types[id];
+                let ty = match ty {
+                    Type::Struct(_) => self.module.isa().pointer_type(),
+                    _ => ty.try_into().unwrap(),
+                };
+
+                let loaded = self
+                    .builder
+                    .ins()
+                    .load(ty, MemFlags::new(), value, offset as i32);
+
+                self.set_value(id, loaded);
 
                 Ok(())
             }
@@ -772,7 +782,13 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             } => {
                 self.compile_id(*base)?;
 
-                let offset = self.semantic.types[*base]
+                // todo(chad): deref more than once?
+                let (unpointered_ty, loaded) = match &self.semantic.types[*base] {
+                    Type::Pointer(id) => (*id, true),
+                    _ => (*base, false),
+                };
+
+                let offset = self.semantic.types[unpointered_ty]
                     .as_struct_params()
                     .unwrap()
                     .iter()
@@ -782,7 +798,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .map(|ty| self.type_size(ty))
                     .sum::<u32>();
 
-                let (base, offset) = match &self.values[*base] {
+                let (mut base, mut offset) = match &self.values[*base] {
                     Value::StackSlot(slot) => {
                         let base = self.builder.ins().stack_addr(
                             self.module.isa().pointer_type(),
@@ -792,9 +808,21 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                         (base, offset)
                     }
                     Value::Address(base, o) => (*base, offset + o),
-                    Value::Value(v) => (*v, 0),
+                    Value::Value(v) => (*v, offset),
                     _ => todo!("implement field for {:?}", &self.values[*base]),
                 };
+
+                if loaded {
+                    // if we are doing field access through a pointer, do an extra load
+                    base = self.builder.ins().load(
+                        self.module.isa().pointer_type(),
+                        MemFlags::new(),
+                        base,
+                        offset as i32,
+                    );
+                    offset = 0;
+                }
+
                 self.values[id] = Value::Address(base, offset);
 
                 Ok(())

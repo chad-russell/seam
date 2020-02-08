@@ -4,6 +4,8 @@
 - [x] if/else
 - [x] pointers
   - [x] address-of
+  - [ ] prohibit taking address of something that doesn't actually have one -- i.e. don't manufacture stack variables
+  - [ ] get rid of `node_slot` concept
   - [x] deref
 - [x] function parameters
 - [x] structs

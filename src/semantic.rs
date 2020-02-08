@@ -149,7 +149,13 @@ impl<'a> Semantic<'a> {
 
                 self.assign_type(*base, Coercion::None)?;
 
-                let params = self.types[*base]
+                // todo(chad): deref more than once?
+                let unpointered_ty = match &self.types[*base] {
+                    Type::Pointer(id) => *id,
+                    _ => *base,
+                };
+
+                let params = self.types[unpointered_ty]
                     .as_struct_params()
                     .ok_or(CompileError::from_string(
                         "Expected struct",
