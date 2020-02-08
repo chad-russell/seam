@@ -386,7 +386,13 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn store(&mut self, id: Id, dest: &Value) {
-        if self.semantic.parser.node_has_slot[id] {
+        let mut has_slot = self.semantic.parser.node_has_slot[id];
+        has_slot |= match &self.semantic.parser.nodes[id] {
+            Node::Load(_) => true,
+            _ => false,
+        };
+
+        if dbg!(has_slot) {
             self.store_copy(id, dest);
         } else {
             self.store_value(id, dest);
@@ -407,7 +413,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             }
             _ => todo!("store_value source for {:?}", &self.values[id]),
         };
-        // let source_value = self.rvalue(id);
 
         match dest {
             Value::StackSlot(slot) => {
@@ -469,12 +474,17 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn rvalue(&mut self, id: Id) -> CraneliftValue {
-        let has_slot = self.semantic.parser.node_has_slot[id];
+        let mut has_slot = self.semantic.parser.node_has_slot[id];
 
-        // println!(
-        //     "{:?} has slot? {}",
-        //     &self.semantic.parser.nodes[id], has_slot
-        // );
+        has_slot |= match &self.semantic.parser.nodes[id] {
+            Node::Load(_) => true,
+            _ => false,
+        };
+
+        println!(
+            "{:?} needs storage? {}",
+            &self.semantic.parser.nodes[id], has_slot
+        );
 
         if has_slot {
             let ty = &self.semantic.types[id];
