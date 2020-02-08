@@ -3,29 +3,20 @@
     (y i64))
 
 (struct line
-    (start point)
-    (end point))
+    (start (ptr point))
+    (end (ptr point)))
 
 (fn main () i64
     (let p point uninit)
-    (set (field p x) 10)
-    (let y (ptr i64) (ref (field p x)))
-    (return y))
+    (set (field p x) 5)
 
-(fn foo () i64
-    (let start-point point uninit)
-    (set (field start-point x) 1)
-    (set (field start-point y) 2)
-
-    (let end-point point uninit)
-    (set (field end-point x) 3)
-    (set (field end-point y) 4)
+    (let ppx (ptr i64) (ref (field p x)))
 
     (let l line uninit)
-    (set (field l start) start-point)
-    (set (field l end) end-point)
+    (set (field l start) (ref p))
 
-    (let sx (ptr i64) (ref (field start-point x)))
-    (store sx 10)
+    (let ppp (ptr (ptr point)) (ref (field l start)))
 
-    (return (field start-point x)))
+    (set (field (load (load ppp)) x) 121)
+
+    (return (load ppx)))

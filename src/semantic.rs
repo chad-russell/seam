@@ -64,6 +64,7 @@ impl<'a> Semantic<'a> {
                 let resolved = self.scope_get(*sym, id)?;
                 self.assign_type(resolved, coercion)?;
                 self.types[id] = self.types[resolved].clone();
+                self.parser.node_has_slot[id] = self.parser.node_has_slot[resolved];
                 Ok(())
             }
             Node::IntLiteral(_) => {
@@ -144,11 +145,16 @@ impl<'a> Semantic<'a> {
                 field_name,
                 field_index: _,
             } => {
+                self.parser.node_has_slot[id] = true;
+
                 self.assign_type(*base, Coercion::None)?;
 
                 let params = self.types[*base]
                     .as_struct_params()
-                    .unwrap()
+                    .ok_or(CompileError::from_string(
+                        "Expected struct",
+                        self.parser.ranges[*base],
+                    ))?
                     .iter()
                     .enumerate()
                     .map(|(index, (ty, name))| (name, (*ty, index as u16)))

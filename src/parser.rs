@@ -293,6 +293,9 @@ pub struct Parser<'a> {
     pub nodes: Vec<Node>,
     pub ranges: Vec<Range>,
 
+    pub node_has_slot: Vec<bool>,
+    has_slot: Vec<bool>,
+
     pub lexer: Lexer<'a>,
 
     pub node_scopes: Vec<Id>,
@@ -527,6 +530,8 @@ impl<'a> Parser<'a> {
             nodes: Default::default(),
             node_scopes: Default::default(),
             ranges: Default::default(),
+            node_has_slot: Default::default(),
+            has_slot: vec![false],
             scopes: scopes,
             top_scope: 0,
             top_level: Default::default(),
@@ -618,6 +623,7 @@ impl<'a> Parser<'a> {
         self.nodes.push(node);
         self.ranges.push(range);
         self.node_scopes.push(self.top_scope);
+        self.node_has_slot.push(*self.has_slot.last().unwrap());
 
         self.nodes.len() - 1
     }
@@ -873,8 +879,11 @@ impl<'a> Parser<'a> {
                     let range = self.expect_close_paren(start)?;
                     Ok(self.push_node(range, Node::Not(arg1)))
                 } else if sym == self.sym_ref {
+                    self.has_slot.push(true);
                     let expr = self.parse_expression()?;
                     let range = self.expect_close_paren(start)?;
+                    self.has_slot.pop();
+
                     Ok(self.push_node(range, Node::Ref(expr)))
                 } else if sym == self.sym_load {
                     let expr = self.parse_expression()?;
@@ -967,6 +976,7 @@ impl<'a> Parser<'a> {
 
                     let range = self.expect_close_paren(start)?;
                     let let_id = self.push_node(range, Node::Let { name, ty, expr });
+                    self.node_has_slot[let_id] = true;
                     self.scope_insert(name, let_id);
                     self.local_insert(let_id);
 
