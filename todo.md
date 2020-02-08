@@ -4,17 +4,20 @@
 - [x] if/else
 - [x] pointers
   - [x] address-of
-  - [ ] prohibit taking address of something that doesn't actually have one -- i.e. don't manufacture stack variables
-  - [ ] get rid of `node_slot` concept
+  - [ ] permit taking address of immediate value -- do the trick where we put it on the stack and then save it so it has memory
   - [x] deref
 - [x] function parameters
 - [x] structs
   - [x] declaration
+  - [ ] struct literals (with own slot)
   - [x] dot syntax
-  - [ ] address of field
+  - [x] address of field
+- [x] syntax overhaul -- more c/rust/go/jai like
+- [ ] type inference
 - [ ] generics
 - [ ] structs as function parameters / return values
   - [ ] follow C ABI, at least for extern functions
+- [ ] arrays
 - [ ] while
 - [ ] f32/f64
 - [ ] more math

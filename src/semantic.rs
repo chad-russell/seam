@@ -64,7 +64,7 @@ impl<'a> Semantic<'a> {
                 let resolved = self.scope_get(*sym, id)?;
                 self.assign_type(resolved, coercion)?;
                 self.types[id] = self.types[resolved].clone();
-                self.parser.node_has_slot[id] = self.parser.node_has_slot[resolved];
+                self.parser.node_is_addressable[id] = self.parser.node_is_addressable[resolved];
                 Ok(())
             }
             Node::IntLiteral(_) => {
@@ -117,26 +117,22 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Set { name, expr } => {
+            Node::Set { name, expr, .. } => {
                 self.assign_type(*name, Coercion::None)?;
                 self.assign_type(*expr, Coercion::Id(*name))?;
 
-                self.types[id] = self.types[*expr].clone();
-                Ok(())
-            }
-            Node::Store { ptr, expr } => {
-                self.assign_type(*ptr, Coercion::None)?;
-                let ptr_ty = match &self.types[*ptr] {
-                    Type::Pointer(ptr_ty) => Ok(*ptr_ty),
-                    _ => Err(CompileError::from_string(
-                        "Expected pointer type",
-                        self.parser.ranges[*ptr],
-                    )),
-                }?;
+                // if name is a load, then we are doing a store
+                let is_load = match &self.parser.nodes[*name] {
+                    Node::Load(_) => true,
+                    _ => false,
+                };
 
-                self.assign_type(*expr, Coercion::Id(ptr_ty))?;
-
-                self.types[id] = self.types[*ptr].clone();
+                if is_load {
+                    match &mut self.parser.nodes[id] {
+                        Node::Set { is_store, .. } => *is_store = true,
+                        _ => {}
+                    }
+                }
 
                 Ok(())
             }
@@ -145,9 +141,8 @@ impl<'a> Semantic<'a> {
                 field_name,
                 field_index: _,
             } => {
-                self.parser.node_has_slot[id] = true;
-
                 self.assign_type(*base, Coercion::None)?;
+                self.parser.node_is_addressable[*base] = true;
 
                 // todo(chad): deref more than once?
                 let unpointered_ty = match &self.types[*base] {

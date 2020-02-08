@@ -91,6 +91,26 @@ impl Value {
         }
         .unwrap()
     }
+
+    fn as_value_relaxed<'a, 'b, 'c>(
+        &self,
+        backend: &mut FunctionBackend<'a, 'b, 'c>,
+    ) -> CraneliftValue {
+        match self {
+            Value::Value(v) => *v,
+            Value::Address(addr, offset) => {
+                let offset = backend.builder.ins().iconst(types::I64, *offset as i64);
+                backend.builder.ins().iadd(*addr, offset)
+            }
+            Value::StackSlot(slot) => {
+                backend
+                    .builder
+                    .ins()
+                    .stack_addr(backend.module.isa().pointer_type(), *slot, 0)
+            }
+            _ => todo!("as_value_relaxed for {:?}", self),
+        }
+    }
 }
 
 pub struct Backend<'a> {
@@ -122,7 +142,6 @@ impl<'a> Backend<'a> {
         self.semantic.parser.node_scopes.clear();
         self.semantic.parser.ranges.clear();
         self.semantic.parser.scopes.clear();
-        self.semantic.parser.calls.clear();
 
         self.semantic.parser.lexer.update_source(source);
 
@@ -159,6 +178,7 @@ impl<'a> Backend<'a> {
             self.values.push(Value::Unassigned);
         }
 
+        // Replace all top-level function values with FuncRefs
         let new_id = self.semantic.parser.get_top_level(function).unwrap();
         for topo in self.semantic.topo.clone() {
             if topo == new_id {
@@ -167,8 +187,6 @@ impl<'a> Backend<'a> {
 
             match self.semantic.parser.nodes[topo] {
                 Node::Func { name, .. } => {
-                    // set the value to come from the FUNC_PTRS map
-                    // Some(FUNC_PTRS.lock().unwrap().get(&name).unwrap())
                     self.values[topo] = Value::FuncRef(name);
                 }
                 _ => {}
@@ -258,7 +276,7 @@ impl<'a> Backend<'a> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(*name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                println!("compiling func {}", func_name);
+                // println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
@@ -314,7 +332,7 @@ impl<'a> Backend<'a> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                println!("{}", ctx.func.display(None));
+                // println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -385,14 +403,27 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         }
     }
 
-    fn store(&mut self, id: Id, dest: &Value) {
-        let mut has_slot = self.semantic.parser.node_has_slot[id];
-        has_slot |= match &self.semantic.parser.nodes[id] {
-            Node::Load(_) => true,
-            _ => false,
-        };
+    // Returns whether the value for a particular id is the value itself, or a pointer to the value
+    // For instance, the constant integer 3 would likely be just the value, and not a pointer.
+    // However a field access (or even a load) needs to always be returned by pointer, because it might refer to a struct literal
+    // Some nodes (like const int above) don't usually return a pointer, but they might need to for other reasons,
+    // e.g. they need their address to be taken. In that case we store that fact in the 'node_has_slot' vec.
+    // Also symbols won't know whether they have a local or not because it depends what they're referencing. So 'node_has_slot' is handy there too.
+    fn rvalue_is_ptr(&mut self, id: Id) -> bool {
+        if self.semantic.parser.node_is_addressable[id] {
+            return true;
+        }
 
-        if dbg!(has_slot) {
+        match &self.semantic.parser.nodes[id] {
+            Node::Load(load_id) => self.rvalue_is_ptr(*load_id),
+            Node::Field { .. } => true,
+            Node::Let { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn store(&mut self, id: Id, dest: &Value) {
+        if self.rvalue_is_ptr(id) {
             self.store_copy(id, dest);
         } else {
             self.store_value(id, dest);
@@ -400,19 +431,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn store_value(&mut self, id: Id, dest: &Value) {
-        let source_value = match &self.values[id] {
-            Value::Value(v) => *v,
-            Value::Address(addr, offset) => {
-                let offset = self.builder.ins().iconst(types::I64, *offset as i64);
-                self.builder.ins().iadd(*addr, offset)
-            }
-            Value::StackSlot(slot) => {
-                self.builder
-                    .ins()
-                    .stack_addr(self.module.isa().pointer_type(), *slot, 0)
-            }
-            _ => todo!("store_value source for {:?}", &self.values[id]),
-        };
+        let source_value = self.values[id].clone().as_value_relaxed(self);
 
         match dest {
             Value::StackSlot(slot) => {
@@ -474,19 +493,13 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn rvalue(&mut self, id: Id) -> CraneliftValue {
-        let mut has_slot = self.semantic.parser.node_has_slot[id];
+        let rvalue_is_ptr = self.rvalue_is_ptr(id);
+        // println!(
+        //     "{:?} needs storage? {}",
+        //     &self.semantic.parser.nodes[id], rvalue_is_ptr
+        // );
 
-        has_slot |= match &self.semantic.parser.nodes[id] {
-            Node::Load(_) => true,
-            _ => false,
-        };
-
-        println!(
-            "{:?} needs storage? {}",
-            &self.semantic.parser.nodes[id], has_slot
-        );
-
-        if has_slot {
+        if rvalue_is_ptr {
             let ty = &self.semantic.types[id];
             let ty = match ty {
                 Type::Struct(_) => self.module.isa().pointer_type(),
@@ -594,32 +607,39 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::Set {
-                name, // Id
-                expr, // Id
+                name,     // Id
+                expr,     // Id
+                is_store, // bool
             } => {
-                self.compile_id(*name)?;
-                let addr = self.values[*name].as_addr();
+                if *is_store {
+                    // Don't actually codegen the load, just codegen what it is loading so we have the pointer. Then it's easy to store into
+                    let name = match &self.semantic.parser.nodes[*name] {
+                        Node::Load(load_id) => *load_id,
+                        _ => unreachable!(),
+                    };
 
-                self.compile_id(*expr)?;
-                self.store(*expr, &addr);
+                    self.compile_id(name)?;
+                    self.compile_id(*expr)?;
 
-                Ok(())
-            }
-            Node::Store { ptr, expr } => {
-                self.compile_id(*ptr)?;
-                self.compile_id(*expr)?;
+                    let mut addr = self.values[name].clone().as_value_relaxed(self);
+                    if self.rvalue_is_ptr(name) {
+                        addr = self.builder.ins().load(
+                            self.module.isa().pointer_type(),
+                            MemFlags::new(),
+                            addr,
+                            0,
+                        );
+                    }
 
-                let addr = match &self.values[*ptr] {
-                    Value::StackSlot(slot) => Value::Value(self.builder.ins().stack_load(
-                        self.module.isa().pointer_type(),
-                        *slot,
-                        0,
-                    )),
-                    Value::Address(_, _) => self.values[id],
-                    _ => panic!("Could not get cranelift value: got {:?}", &self.values[id]),
-                };
+                    self.store(*expr, &Value::Value(addr));
+                } else {
+                    self.compile_id(*name)?;
 
-                self.store(*expr, &addr);
+                    let addr = self.values[*name].as_addr();
+
+                    self.compile_id(*expr)?;
+                    self.store(*expr, &addr);
+                }
 
                 Ok(())
             }
@@ -741,7 +761,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                         ));
                     }
                     Value::Address(addr, offset) => self.values[id] = Value::Address(addr, offset),
-                    _ => todo!(),
+                    Value::Value(value) => self.values[id] = Value::Value(value),
+                    _ => todo!("{:?}", &self.values[*ref_id]),
                 };
 
                 Ok(())
@@ -749,7 +770,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Load(load_id) => {
                 self.compile_id(*load_id)?;
 
-                let (mut value, mut offset) = match &self.values[*load_id] {
+                let (value, offset) = match &self.values[*load_id] {
                     Value::Address(addr, offset) => (*addr, *offset),
                     Value::Value(value) => (*value, 0),
                     Value::StackSlot(slot) => (
@@ -828,9 +849,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                         self.module.isa().pointer_type(),
                         MemFlags::new(),
                         base,
-                        offset as i32,
+                        0,
                     );
-                    offset = 0;
                 }
 
                 self.values[id] = Value::Address(base, offset);

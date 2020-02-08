@@ -1,31 +1,74 @@
-(struct point 
-    (x i64)
-    (y i64))
+struct point {
+    x: i64,
+    y: i64,
+}
 
-(struct line
-    (start (ptr point))
-    (end (ptr point)))
+struct line {
+    start: *point,
+    end: *point,
+}
 
-(fn main () i64
-    (let p point uninit)
-    (set (field p x) 5)
+fn main() i64 {
+    let a: i64 = 3;
+    let b: **i64 = &&a;
+    return ^^b;
+}
 
-    (let ppx (ptr i64) (ref (field p x)))
+// fn double_load() i64 {
+//     let a: i64 = 10;
+//     let pa: *i64 = &a;
+//     let ppa: **i64 = &pa;
+//     return ^^ppa;
+// }
 
-    (let l line uninit)
-    (set (field l start) (ref p))
+// fn test_load_param() i64 {
+//     let a: i64 = 10;
+//     let pa: *i64 = &a;
+//     let ppa: **i64 = &pa;
+//     return load_wrapper(ppa);
+// }
 
-    (let ppp (ptr (ptr point)) (ref (field l start)))
-    (let pp (ptr point) (load ppp))
-    (set (field pp x) 123)
+// fn load_wrapper(n: **i64) i64 {
+//     return ^^n;
+// }
 
-    ; (let ppp2 (ptr (ptr point)) (ref (field l start)))
-    ; (set (field (load ppp2) x) 120)
+// fn bar() i64 {
+//     let p: point = ---;
+//     p.x = 5;
+//     p.y = 9;
 
-    ; (let ps (ptr point) (field l start))
-    ; (set (field ps x) 300)
+//     let ppx: *i64 = &p.x;
 
-    ; (let a i64 10)
-    ; (let pa (ptr i64) (ref a))
+//     let l: line = ---;
+//     l.start = &p;
 
-    (return (load ppx)))
+//     // let l: *line = &l2;
+
+//     // let ppp: **point = &l.start;
+//     // let pp: *point = ^ppp;
+//     // pp.y = 123;
+
+//     let ppp2: **point = &l.start;
+//     (^ppp2).y = 120;
+
+//     // let ps: *point = l.start;
+//     // ps.y = 300;
+
+//     // l.start.y = 301;
+
+//     return p.y;
+// }
+
+// fn baz() i64 {
+//     let p: point = ---;
+//     let pp: *point = &p;
+//     let ppp: **point = &pp;
+
+//     let p2: point = ---;
+//     p2.x = 3;
+//     p2.y = 8;
+//     let pp2: *point = &p2;
+
+//     ^^ppp = ^pp2;
+//     return p.y;
+// }
