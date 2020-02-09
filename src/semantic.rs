@@ -153,7 +153,10 @@ impl<'a> Semantic<'a> {
                 let params = self.types[unpointered_ty]
                     .as_struct_params()
                     .ok_or(CompileError::from_string(
-                        "Expected struct",
+                        format!(
+                            "Expected struct, got {:?}",
+                            self.parser.debug(unpointered_ty)
+                        ),
                         self.parser.ranges[*base],
                     ))?
                     .iter()

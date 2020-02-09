@@ -1017,6 +1017,7 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `^`
 
                 let expr = self.parse_expression()?;
+                self.node_is_addressable[expr] = true;
                 let end = self.ranges[expr].end;
 
                 Ok(self.push_node(Range::new(start, end), Node::Load(expr)))

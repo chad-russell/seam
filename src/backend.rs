@@ -60,16 +60,15 @@ pub enum Value {
     Value(CraneliftValue),
     // todo(chad): not everything needs to a stack slot
     // using SSA Values where possible might be more efficient
-    StackSlot(StackSlot),
+    // StackSlot(StackSlot),
     // similar to a stackslot, but for general memory (or when the slot index isn't known, such as in a deref)
-    Address(CraneliftValue, u32),
+    // Address(CraneliftValue, u32),
 }
 
 impl Value {
     fn as_addr(&self) -> Value {
         match self {
-            Value::StackSlot(_) => Some(self),
-            Value::Address(_, _) => Some(self),
+            Value::Value(_) => Some(self),
             _ => None,
         }
         .unwrap()
@@ -92,22 +91,22 @@ impl Value {
         .unwrap()
     }
 
+    // findme
+    // let offset = backend.builder.ins().iconst(types::I64, *offset as i64);
+    // backend.builder.ins().iadd(*addr, offset)
+
+    // findme
+    // backend
+    //     .builder
+    //     .ins()
+    //     .stack_addr(backend.module.isa().pointer_type(), *slot, 0)
+
     fn as_value_relaxed<'a, 'b, 'c>(
         &self,
         backend: &mut FunctionBackend<'a, 'b, 'c>,
     ) -> CraneliftValue {
         match self {
             Value::Value(v) => *v,
-            Value::Address(addr, offset) => {
-                let offset = backend.builder.ins().iconst(types::I64, *offset as i64);
-                backend.builder.ins().iadd(*addr, offset)
-            }
-            Value::StackSlot(slot) => {
-                backend
-                    .builder
-                    .ins()
-                    .stack_addr(backend.module.isa().pointer_type(), *slot, 0)
-            }
             _ => todo!("as_value_relaxed for {:?}", self),
         }
     }
@@ -332,7 +331,7 @@ impl<'a> Backend<'a> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                // println!("{}", ctx.func.display(None));
+                println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -434,18 +433,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         let source_value = self.values[id].clone().as_value_relaxed(self);
 
         match dest {
-            Value::StackSlot(slot) => {
-                self.builder.ins().stack_store(source_value, *slot, 0);
-            }
             Value::Value(value) => {
                 self.builder
                     .ins()
                     .store(MemFlags::new(), source_value, *value, 0);
-            }
-            Value::Address(addr, offset) => {
-                self.builder
-                    .ins()
-                    .store(MemFlags::new(), source_value, *addr, *offset as i32);
             }
             _ => todo!("store_value dest for {:?}", dest),
         }
@@ -454,33 +445,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     fn store_copy(&mut self, id: Id, dest: &Value) {
         let size = self.type_size(id);
 
-        let source_value = match &self.values[id] {
-            Value::StackSlot(slot) => {
-                self.builder
-                    .ins()
-                    .stack_addr(self.module.isa().pointer_type(), *slot, 0)
-            }
-            Value::Address(addr, offset) => {
-                let offset = self.builder.ins().iconst(types::I64, *offset as i64);
-                self.builder.ins().iadd(*addr, offset)
-            }
-            Value::Value(v) => *v,
-            _ => todo!("store_copy for {:?}", &self.values[id]),
-        };
-
-        let dest_value = match dest {
-            Value::StackSlot(slot) => {
-                self.builder
-                    .ins()
-                    .stack_addr(self.module.isa().pointer_type(), *slot, 0)
-            }
-            Value::Address(addr, offset) => {
-                let offset = self.builder.ins().iconst(types::I64, *offset as i64);
-                self.builder.ins().iadd(*addr, offset)
-            }
-            Value::Value(v) => *v,
-            _ => todo!("store_copy for {:?}", dest),
-        };
+        let source_value = self.values[id].as_value();
+        let dest_value = dest.as_value();
 
         self.builder.emit_small_memcpy(
             self.module.isa().frontend_config(),
@@ -507,12 +473,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             };
 
             match &self.values[id] {
-                Value::StackSlot(slot) => self.builder.ins().stack_load(ty, *slot, 0),
-                Value::Address(addr, offset) => {
-                    self.builder
-                        .ins()
-                        .load(ty, MemFlags::new(), *addr, *offset as i32)
-                }
                 Value::Value(v) => self.builder.ins().load(ty, MemFlags::new(), *v, 0),
                 _ => panic!("Could not get cranelift value: {:?}", &self.values[id]),
             }
@@ -595,14 +555,18 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     offset: None,
                 });
 
-                let slot = Value::StackSlot(slot);
+                let slot_addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                let value = Value::Value(slot_addr);
 
                 if let Some(expr) = expr {
                     self.compile_id(*expr)?;
-                    self.store(*expr, &slot);
+                    self.store(*expr, &value);
                 }
 
-                self.values[id] = slot;
+                self.values[id] = value;
 
                 Ok(())
             }
@@ -711,7 +675,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     size,
                     offset: None,
                 });
-                self.values[id] = Value::StackSlot(slot);
+                let slot_addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                self.values[id] = Value::Value(slot_addr);
 
                 let true_block = self.builder.create_ebb();
                 let false_block = self.builder.create_ebb();
@@ -729,7 +697,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.current_block = true_block;
                     self.compile_id(*true_id)?;
 
-                    self.store(*true_id, &Value::StackSlot(slot));
+                    self.store(*true_id, &Value::Value(slot_addr));
 
                     self.builder.ins().jump(cont_block, &[]);
                 }
@@ -740,7 +708,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.current_block = false_block;
                     self.compile_id(false_id.unwrap())?;
 
-                    self.store(false_id.unwrap(), &Value::StackSlot(slot));
+                    self.store(false_id.unwrap(), &Value::Value(slot_addr));
 
                     self.builder.ins().jump(cont_block, &[]);
                 }
@@ -753,32 +721,35 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Ref(ref_id) => {
                 self.compile_id(*ref_id)?;
                 match self.values[*ref_id] {
-                    Value::StackSlot(slot) => {
-                        self.values[id] = Value::Value(self.builder.ins().stack_addr(
-                            self.module.isa().pointer_type(),
-                            slot,
-                            0,
-                        ));
-                    }
-                    Value::Address(addr, offset) => self.values[id] = Value::Address(addr, offset),
-                    Value::Value(value) => self.values[id] = Value::Value(value),
+                    Value::Value(value) => self.values[id] = self.values[*ref_id],
                     _ => todo!("{:?}", &self.values[*ref_id]),
                 };
+
+                // if we are meant to be addressable, then we need to store our actual value into something which has an address
+                if self.semantic.parser.node_is_addressable[id] {
+                    // todo(chad): is there any benefit to creating all of these up front?
+                    let size = self.module.isa().pointer_bytes() as u32;
+                    let slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size,
+                        offset: None,
+                    });
+                    let slot_addr =
+                        self.builder
+                            .ins()
+                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let value = Value::Value(slot_addr);
+                    self.store_value(id, &value);
+                    self.values[id] = value;
+                }
 
                 Ok(())
             }
             Node::Load(load_id) => {
                 self.compile_id(*load_id)?;
 
-                let (value, offset) = match &self.values[*load_id] {
-                    Value::Address(addr, offset) => (*addr, *offset),
-                    Value::Value(value) => (*value, 0),
-                    Value::StackSlot(slot) => (
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), *slot, 0),
-                        0,
-                    ),
+                let value = match &self.values[*load_id] {
+                    Value::Value(value) => *value,
                     _ => todo!("load for {:?}", &self.values[*load_id]),
                 };
 
@@ -788,10 +759,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     _ => ty.try_into().unwrap(),
                 };
 
-                let loaded = self
-                    .builder
-                    .ins()
-                    .load(ty, MemFlags::new(), value, offset as i32);
+                let loaded = self.builder.ins().load(ty, MemFlags::new(), value, 0);
 
                 self.set_value(id, loaded);
 
@@ -829,21 +797,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .map(|ty| self.type_size(ty))
                     .sum::<u32>();
 
-                let (mut base, mut offset) = match &self.values[*base] {
-                    Value::StackSlot(slot) => {
-                        let base = self.builder.ins().stack_addr(
-                            self.module.isa().pointer_type(),
-                            *slot,
-                            0,
-                        );
-                        (base, offset)
-                    }
-                    Value::Address(base, o) => (*base, offset + o),
-                    Value::Value(v) => (*v, offset),
-                    _ => todo!("implement field for {:?}", &self.values[*base]),
-                };
+                let mut base = self.values[*base].as_value();
 
                 if loaded {
+                    println!("loaded");
+
                     // if we are doing field access through a pointer, do an extra load
                     base = self.builder.ins().load(
                         self.module.isa().pointer_type(),
@@ -853,7 +811,12 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     );
                 }
 
-                self.values[id] = Value::Address(base, offset);
+                if offset != 0 {
+                    let offset = self.builder.ins().iconst(types::I64, offset as i64);
+                    base = self.builder.ins().iadd(base, offset);
+                }
+
+                self.values[id] = Value::Value(base);
 
                 Ok(())
             }
