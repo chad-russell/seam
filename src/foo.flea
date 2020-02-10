@@ -10,12 +10,12 @@ struct line {
 
 struct Foo {
     value: i64,
-    bar: **Bar,
+    bar: *Bar,
 }
 
 struct Bar {
     value: i64,
-    baz: Baz,
+    baz: *Baz,
 }
 
 struct Baz {
@@ -24,14 +24,33 @@ struct Baz {
 }
 
 struct Qux {
-    value: *i64,
+    value: **i64,
+}
+
+enum E {
+    x: i64,
+    y: i64,
 }
 
 fn main() i64 {
     return cpi_test();
-
-    // return ^^^&&&10;
 }
+
+// fn r3() i64 {
+//     return 3;
+// }
+
+// fn test_fn_ptr() {
+//     let f: fn() i64 = ---;
+//     f = r3;
+//     return f();
+// }
+
+// fn set(x: *i64) i64 {
+//     let xx: *i64 = x;
+//     ^xx = 3;
+//     return 999;
+// }
 
 fn cpi_test() i64 {
     let foo: Foo = ---;
@@ -39,27 +58,25 @@ fn cpi_test() i64 {
     let baz: Baz = ---;
     let qux: Qux = ---;
 
-    let value: i64 = 444;
-
     foo.value = 111;
     bar.value = 222;
     baz.value = 333;
-    qux.value = &value;
+    qux.value = &&444;
 
     baz.qux = &qux;
-    bar.baz = baz;
-    foo.bar = &&bar;
+    bar.baz = &baz;
+    foo.bar = &bar;
 
-    // ^(^bar.baz.qux).value = 3;
+    ^bar.baz.qux.value = &7;
 
     // assert(3 == ^^foo.bar.baz.qux.value);
     // assert(3 == ^^bar.baz.qux.value);
     // assert(3 == ^^baz.qux.value);
     // assert(3 == ^^qux.value);
 
-    return ^(^foo.bar).baz.qux.value;
+    return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
 }
-
+    
 // fn double_load() i64 {
 //     let a: i64 = 10;
 //     let pa: *i64 = &a;
@@ -72,7 +89,8 @@ fn cpi_test() i64 {
 // }
 
 // fn load_wrapper(n: **i64) i64 {
-//     return ^^n;
+//     let nn: **i64 = n;
+//     return ^^nn;
 // }
 
 // fn bar() i64 {
@@ -89,13 +107,13 @@ fn cpi_test() i64 {
 //     // let pp: *point = ^ppp;
 //     // pp.y = 123;
 
-//     // let ppp2: **point = &l.start;
-//     // (^ppp2).y = 120;
+//     let ppp2: **point = &l.start;
+//     (^ppp2).y = 120;
 
 //     // let ps: *point = l.start;
 //     // ps.y = 300;
 
-//     l.start.y = 123;
+//     // l.start.y = 123;
 
 //     return p.y;
 // }

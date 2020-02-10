@@ -4,6 +4,7 @@ use crate::semantic::Semantic;
 use cranelift::codegen::ir::{
     FuncRef, MemFlags, Signature, StackSlot, StackSlotData, StackSlotKind,
 };
+use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::{
     types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
@@ -75,14 +76,6 @@ impl Value {
         .clone()
     }
 
-    fn as_func_ref(&self) -> Sym {
-        *match self {
-            Value::FuncRef(fr) => Some(fr),
-            _ => None,
-        }
-        .unwrap()
-    }
-
     fn as_value(&self) -> CraneliftValue {
         *match self {
             Value::Value(v) => Some(v),
@@ -107,6 +100,7 @@ impl Value {
     ) -> CraneliftValue {
         match self {
             Value::Value(v) => *v,
+            Value::FuncRef(sym) => backend.builder.ins().iconst(types::I64, *sym as i64),
             _ => todo!("as_value_relaxed for {:?}", self),
         }
     }
@@ -275,7 +269,7 @@ impl<'a> Backend<'a> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(*name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                // println!("compiling func {}", func_name);
+                println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
@@ -397,7 +391,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Type::Basic(BasicType::F32) => 4,
             Type::Basic(BasicType::F64) => 8,
             Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
-            Type::Struct(params) => params.iter().map(|(p, _)| self.type_size(*p)).sum(),
+            Type::Func { .. } => self.module.isa().pointer_bytes() as _,
+            Type::Struct(params) => params.iter().map(|p| self.type_size(*p)).sum(),
             _ => todo!("type_size"),
         }
     }
@@ -513,6 +508,22 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 self.set_value(id, value);
 
+                if self.semantic.parser.node_is_addressable[id] {
+                    let size = self.type_size(id);
+                    let slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size,
+                        offset: None,
+                    });
+                    let slot_addr =
+                        self.builder
+                            .ins()
+                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let value = Value::Value(slot_addr);
+                    self.store_value(id, &value);
+                    self.values[id] = value;
+                }
+
                 Ok(())
             }
             Node::BoolLiteral(b) => {
@@ -521,6 +532,33 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .ins()
                     .iconst(types::I32, if *b { 1 } else { 0 });
                 self.set_value(id, value);
+
+                Ok(())
+            }
+            Node::StructLiteral { name: _, params } => {
+                // todo(chad): @Optimization: this is about the slowest thing we could ever do, but works great.
+                // Come back later once everything is working and make it fast
+                let size = self.type_size(id);
+                let slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
+                let mut addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
+
+                self.values[id] = Value::Value(addr);
+
+                for param in params {
+                    self.compile_id(*param)?;
+                    self.store(*param, &Value::Value(addr));
+
+                    let param_size = self.type_size(*param) as i64;
+                    let param_size = self.builder.ins().iconst(types::I64, param_size);
+                    addr = self.builder.ins().iadd(addr, param_size);
+                }
 
                 Ok(())
             }
@@ -610,7 +648,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Call {
                 name,   // Id
                 params, // Vec<Id>
-                is_macro: _,
                 is_indirect: _,
             } => {
                 // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
@@ -620,17 +657,18 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.compile_id(*param)?;
                 }
 
-                let func_sym = self.values[*name].as_func_ref();
-
-                let cranelift_params = [self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, func_sym.to_usize() as i64)];
+                let cranelift_param = match &self.values[*name] {
+                    Value::FuncRef(fr) => {
+                        self.builder.ins().iconst(types::I64, fr.to_usize() as i64)
+                    }
+                    Value::Value(_) => self.rvalue(*name),
+                    _ => unreachable!("unrecognized Value type in codegen Node::Call"),
+                };
 
                 let call_inst = self
                     .builder
                     .ins()
-                    .call(self.dynamic_fn_ptr_decl, &cranelift_params);
+                    .call(self.dynamic_fn_ptr_decl, &[cranelift_param]);
                 let value = self.builder.func.dfg.inst_results(call_inst)[0];
 
                 // Now call indirect
@@ -721,7 +759,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Ref(ref_id) => {
                 self.compile_id(*ref_id)?;
                 match self.values[*ref_id] {
-                    Value::Value(value) => self.values[id] = self.values[*ref_id],
+                    Value::Value(_) => self.values[id] = self.values[*ref_id],
                     _ => todo!("{:?}", &self.values[*ref_id]),
                 };
 
@@ -774,6 +812,14 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 self.values[id] = Value::Value(params[*index as usize]);
                 Ok(())
             }
+            Node::ValueParam {
+                name: _, // Sym
+                value,
+            } => {
+                self.compile_id(*value)?;
+                self.values[id] = self.values[*value];
+                Ok(())
+            }
             Node::Field {
                 base,
                 field_name: _,
@@ -792,7 +838,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     .unwrap()
                     .iter()
                     .enumerate()
-                    .map(|(_index, (ty, _name))| *ty)
+                    .map(|(_index, id)| {
+                        let (_name, ty, _index) =
+                            self.semantic.parser.nodes[*id].as_param().unwrap();
+                        ty
+                    })
                     .take(*field_index as usize)
                     .map(|ty| self.type_size(ty))
                     .sum::<u32>();
@@ -800,8 +850,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let mut base = self.values[*base].as_value();
 
                 if loaded {
-                    println!("loaded");
-
                     // if we are doing field access through a pointer, do an extra load
                     base = self.builder.ins().load(
                         self.module.isa().pointer_type(),
@@ -847,6 +895,7 @@ impl TryInto<types::Type> for &Type {
                 BasicType::F64 => Ok(types::F64),
                 _ => Err("Could not convert type"),
             },
+            &Type::Func { .. } => Ok(types::I64),
             &Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
             _ => Err("Could not convert type"),
         }

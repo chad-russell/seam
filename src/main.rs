@@ -18,19 +18,19 @@ fn main() -> Result<(), CompileError> {
 
     //     backend.update_source(
     //         "
-    // fn main() i64 {
-    //     let a: i64 = ---;
-    //     a = bar();
-    //     return a;
+    // fn r3() i64 {
+    //     return 8;
     // }
 
-    // fn bar() i64 {
-    //     return 18;
+    // fn main() i64 {
+    //     let ppf: **fn() i64 = &&r3;
+    //     let pf: *fn() i64 = ^ppf;
+    //     return (^pf)();
     // }
-    //         ",
+    //             ",
     //     )?;
 
-    //     backend.recompile_function("bar")?;
+    //     backend.recompile_function("r3")?;
     //     dbg!(backend.call_func("main"));
 
     Ok(())

@@ -58,11 +58,13 @@ pub enum Type {
     Pointer(Id),
     String,
     Func { return_ty: Id, input_tys: Vec<Id> },
-    Struct(Vec<(Id, Sym)>),
+    // Struct(Vec<(Id, Sym)>),
+    Struct(Vec<Id>),
+    Enum(Vec<Id>),
 }
 
 impl Type {
-    pub fn as_struct_params(&self) -> Option<&Vec<(Id, Sym)>> {
+    pub fn as_struct_params(&self) -> Option<&Vec<Id>> {
         match self {
             Type::Struct(params) => Some(params),
             _ => None,
@@ -89,6 +91,9 @@ enum Token {
     Asterisk,
     Eq,
     Comma,
+    Struct,
+    Enum,
+    Fn,
     True,
     False,
     Ampersand,
@@ -260,7 +265,39 @@ impl<'a> Lexer<'a> {
 
         self.top = self.second.clone();
 
+        // check_keywords! {
+        //     "---" => Token::Uninit,
+        //     "fn" => Token::Fn,
+        //     "struct" => Token::Struct,
+        //     "true" => Token::True,
+        //     "false" => Token::False,
+        // }
+
+        // check_tokens! {
+        //     "(" => Token::LParen,
+        //     ")" => Token::RParen,
+        //     "{" => Token::LCurly,
+        //     "}" => Token::RCurly,
+        //     "," => Token::Comma,
+        //     "&" => Token::Ampersand,
+        //     "." => Token::Dot,
+        //     "^" => Token::Caret,
+        //     ";" => Token::Semicolon,
+        //     "*" => Token::Asterisk,
+        //     ":" => Token::Colon,
+        //     "=" => Token::Eq,
+        // }
+
         if self.prefix_keyword("---", Token::Uninit) {
+            return;
+        }
+        if self.prefix_keyword("fn", Token::Fn) {
+            return;
+        }
+        if self.prefix_keyword("struct", Token::Struct) {
+            return;
+        }
+        if self.prefix_keyword("enum", Token::Enum) {
             return;
         }
         if self.prefix_keyword("true", Token::True) {
@@ -412,18 +449,7 @@ pub struct Parser<'a> {
     pub top_level: Vec<Id>,
     pub top_level_map: BTreeMap<Sym, Id>,
 
-    sym_fn: Sym,
-    sym_struct: Sym,
-    sym_field: Sym,
     sym_let: Sym,
-    sym_uninit: Sym,
-    sym_set: Sym,
-    sym_store: Sym,
-    sym_ptr: Sym,
-    sym_ref: Sym,
-    sym_load: Sym,
-    sym_ptrcast: Sym,
-    sym_call: Sym,
     sym_return: Sym,
     sym_none: Sym,
     sym_i8: Sym,
@@ -503,11 +529,6 @@ pub enum Node {
         expr: Id,
         is_store: bool,
     },
-    Extern {
-        name: Sym,
-        params: Vec<Id>,
-        return_ty: Id,
-    },
     Func {
         name: Sym,
         scope: Id,
@@ -516,6 +537,7 @@ pub enum Node {
         stmts: Vec<Id>,
     },
     FuncParam {
+        // todo(chad): rename to DeclParam
         name: Sym,
         ty: Id,
         index: u16,
@@ -524,12 +546,21 @@ pub enum Node {
         name: Sym,
         params: Vec<Id>,
     },
+    Enum {
+        name: Sym,
+        params: Vec<Id>,
+    },
+    ValueParam {
+        name: Option<Sym>,
+        value: Id,
+    },
+    StructLiteral {
+        name: Option<Sym>,
+        params: Vec<Id>,
+    },
     Call {
         name: Id,
         params: Vec<Id>,
-
-        // todo(chad): bitflag?
-        is_macro: bool,
         is_indirect: bool,
     },
     Add(Id, Id),
@@ -565,6 +596,13 @@ impl Node {
         }
     }
 
+    pub fn as_param(&self) -> Option<(Sym, Id, u16)> {
+        match self {
+            Node::FuncParam { name, ty, index } => Some((*name, *ty, *index)),
+            _ => None,
+        }
+    }
+
     pub fn param_field_name(&self) -> Option<Sym> {
         match self {
             Node::FuncParam { name, ty, index } => Some(*name),
@@ -581,18 +619,7 @@ impl<'a> Parser<'a> {
         lexer.pop();
         lexer.pop();
 
-        let sym_fn = lexer.string_interner.get_or_intern("fn");
-        let sym_struct = lexer.string_interner.get_or_intern("struct");
-        let sym_field = lexer.string_interner.get_or_intern("field");
         let sym_let = lexer.string_interner.get_or_intern("let");
-        let sym_uninit = lexer.string_interner.get_or_intern("uninit");
-        let sym_set = lexer.string_interner.get_or_intern("set");
-        let sym_ptr = lexer.string_interner.get_or_intern("ptr");
-        let sym_ref = lexer.string_interner.get_or_intern("ref");
-        let sym_load = lexer.string_interner.get_or_intern("load");
-        let sym_ptrcast = lexer.string_interner.get_or_intern("ptrcast");
-        let sym_store = lexer.string_interner.get_or_intern("store");
-        let sym_call = lexer.string_interner.get_or_intern("call");
         let sym_return = lexer.string_interner.get_or_intern("return");
         let sym_none = lexer.string_interner.get_or_intern("none");
         let sym_i8 = lexer.string_interner.get_or_intern("i8");
@@ -632,18 +659,7 @@ impl<'a> Parser<'a> {
             top_scope: 0,
             top_level: Default::default(),
             top_level_map: Default::default(),
-            sym_fn,
-            sym_struct,
-            sym_field,
             sym_let,
-            sym_uninit,
-            sym_set,
-            sym_ptr,
-            sym_ref,
-            sym_load,
-            sym_ptrcast,
-            sym_store,
-            sym_call,
             sym_return,
             sym_none,
             sym_i8,
@@ -748,41 +764,45 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok {
-            // Token::LParen => {
-            //     let start = self.lexer.top.range.start;
-            //     self.lexer.pop();
+            Token::Fn => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `fn`
 
-            //     let sym_id = self.parse_symbol()?;
-            //     let sym = self.nodes[sym_id].as_symbol().unwrap();
-            //     if sym == self.sym_fn {
-            //         let mut input_tys = Vec::new();
-            //         self.expect(&Token::LParen)?;
-            //         while self.lexer.top.tok != Token::RParen {
-            //             input_tys.push(self.parse_type()?);
-            //         }
-            //         self.expect(&Token::RParen)?;
+                self.expect(&Token::LParen)?;
+                let input_tys = self.parse_params()?;
+                self.expect(&Token::RParen)?;
 
-            //         let return_ty = self.parse_type()?;
+                let return_ty = self.parse_type()?;
+                let end = self.ranges[return_ty].end;
 
-            //         let range = self.expect_close_paren(start)?;
-            //         Ok(self.push_node(
-            //             range,
-            //             Node::TypeLiteral(Type::Func {
-            //                 return_ty,
-            //                 input_tys,
-            //             }),
-            //         ))
-            //     } else if sym == self.sym_ptr {
-            //         let ptr_ty = self.parse_type()?;
-            //         let range = self.expect_close_paren(start)?;
-            //         Ok(self.push_node(range, Node::TypeLiteral(Type::Pointer(ptr_ty))))
-            //     } else {
-            //         Err(CompileError::from_string(
-            //             "Failed to parse type",
-            //             self.lexer.top.range,
-            //         ))
-            //     }
-            // }
+                Ok(self.push_node(
+                    Range::new(start, end),
+                    Node::TypeLiteral(Type::Func {
+                        return_ty,
+                        input_tys,
+                    }),
+                ))
+            }
+            Token::Struct => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `struct`
+
+                self.expect(&Token::LCurly)?;
+                let params = self.parse_params()?;
+                let range = self.expect_range(start, Token::RCurly)?;
+
+                Ok(self.push_node(range, Node::TypeLiteral(Type::Struct(params))))
+            }
+            Token::Enum => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `enum`
+
+                self.expect(&Token::LCurly)?;
+                let params = self.parse_params()?;
+                let range = self.expect_range(start, Token::RCurly)?;
+
+                Ok(self.push_node(range, Node::TypeLiteral(Type::Enum(params))))
+            }
             Token::Asterisk => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `*`
@@ -887,121 +907,6 @@ impl<'a> Parser<'a> {
                 self.lexer.pop();
                 Ok(self.push_node(range, Node::StringLiteral(s.clone())))
             }
-            // Token::LParen => {
-            //     let start = self.lexer.top.range.start;
-            //     self.lexer.pop();
-
-            //     let sym = self.parse_sym()?;
-            //     if sym == self.sym_plus {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Add(arg1, arg2)))
-            //     } else if sym == self.sym_minus {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Sub(arg1, arg2)))
-            //     } else if sym == self.sym_mul {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Mul(arg1, arg2)))
-            //     } else if sym == self.sym_div {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Div(arg1, arg2)))
-            //     } else if sym == self.sym_lt {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::LessThan(arg1, arg2)))
-            //     } else if sym == self.sym_gt {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::GreaterThan(arg1, arg2)))
-            //     } else if sym == self.sym_eq {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::EqualTo(arg1, arg2)))
-            //     } else if sym == self.sym_and {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::And(arg1, arg2)))
-            //     } else if sym == self.sym_or {
-            //         let arg1 = self.parse_expression()?;
-            //         let arg2 = self.parse_expression()?;
-
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Or(arg1, arg2)))
-            //     } else if sym == self.sym_not {
-            //         let arg1 = self.parse_expression()?;
-            //         let range = self.expect_close_paren(start)?;
-            //         Ok(self.push_node(range, Node::Not(arg1)))
-            //     } else if sym == self.sym_ref {
-            //         let expr = self.parse_expression()?;
-            //         let range = self.expect_close_paren(start)?;
-
-            //         Ok(self.push_node(range, Node::Ref(expr)))
-            //     } else if sym == self.sym_load {
-            //         let expr = self.parse_expression()?;
-            //         let range = self.expect_close_paren(start)?;
-            //         Ok(self.push_node(range, Node::Load(expr)))
-            //     } else if sym == self.sym_ptrcast {
-            //         let ty = self.parse_type()?;
-            //         let expr = self.parse_expression()?;
-            //         let range = self.expect_close_paren(start)?;
-            //         Ok(self.push_node(range, Node::PtrCast { ty, expr }))
-            //     } else if sym == self.sym_if {
-            //         self.parse_if(start)
-            //     } else if sym == self.sym_call {
-            //         let name = self.parse_symbol()?;
-            //         self.parse_call(start, name)
-            //     } else if sym == self.sym_field {
-            //         let base = self.parse_expression()?;
-            //         let field_name = self.parse_sym()?;
-            //         let range = self.expect_close_paren(start)?;
-
-            //         let field_id = self.push_node(
-            //             range,
-            //             Node::Field {
-            //                 base,
-            //                 field_name,
-            //                 field_index: 0,
-            //             },
-            //         );
-
-            //         self.node_has_slot[field_id] = true;
-
-            //         Ok(field_id)
-            //     } else {
-            //         Err(CompileError::from_string(
-            //             "Unexpected",
-            //             self.lexer.top.range,
-            //         ))
-            //     }
-            // }
             Token::Ampersand => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `&`
@@ -1032,13 +937,25 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `false`
                 Ok(self.push_node(range, Node::BoolLiteral(false)))
             }
+            Token::LCurly => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `{`
+
+                let params = self.parse_value_params()?;
+
+                let range = self.expect_range(start, Token::RCurly)?;
+                Ok(self.push_node(range, Node::StructLiteral { name: None, params }))
+            }
             _ => {
                 let start = self.lexer.top.range.start;
 
                 let mut value = self.parse_lvalue()?;
 
                 // dot / function call?
-                while self.lexer.top.tok == Token::Dot || self.lexer.top.tok == Token::LParen {
+                while self.lexer.top.tok == Token::Dot
+                    || self.lexer.top.tok == Token::LParen
+                    || self.lexer.top.tok == Token::LCurly
+                {
                     if self.lexer.top.tok == Token::Dot {
                         self.lexer.pop(); // `.`
                         let field_name = self.parse_symbol()?;
@@ -1059,7 +976,7 @@ impl<'a> Parser<'a> {
 
                         // all field accesses represent addressable memory
                         self.node_is_addressable[value] = true;
-                    } else {
+                    } else if self.lexer.top.tok == Token::LParen {
                         self.expect(&Token::LParen)?;
                         let params = self.parse_value_params()?;
                         let range = self.expect_range(start, Token::RParen)?;
@@ -1070,9 +987,10 @@ impl<'a> Parser<'a> {
                                 name: value,
                                 params,
                                 is_indirect: false,
-                                is_macro: false,
                             },
                         );
+                    } else {
+                        todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
                     }
                 }
 
@@ -1244,11 +1162,23 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    fn parse_value_param(&mut self) -> Result<Id, CompileError> {
+        let start = self.lexer.top.range.start;
+
+        // todo(chad): optionally parse name
+        let name = None;
+        let value = self.parse_expression()?;
+
+        let end = self.ranges[value].end;
+
+        Ok(self.push_node(Range::new(start, end), Node::ValueParam { name, value }))
+    }
+
     fn parse_value_params(&mut self) -> Result<Vec<Id>, CompileError> {
         let mut params = Vec::new();
 
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
-            params.push(self.parse_expression()?);
+            params.push(self.parse_value_param()?);
 
             if self.lexer.top.tok == Token::Comma {
                 self.lexer.pop(); // `,`
@@ -1259,7 +1189,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_fn(&mut self, start: Location) -> Result<Id, CompileError> {
-        self.expect(&Token::Symbol(self.sym_fn))?;
+        self.expect(&Token::Fn)?;
 
         let name = self.parse_sym()?;
 
@@ -1310,7 +1240,7 @@ impl<'a> Parser<'a> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
-            Token::Symbol(sym) if sym == self.sym_struct => {
+            Token::Struct => {
                 self.lexer.pop();
                 let name = self.parse_sym()?;
 
@@ -1323,68 +1253,20 @@ impl<'a> Parser<'a> {
 
                 Ok(id)
             }
-            Token::Symbol(sym) if sym == self.sym_fn => self.parse_fn(start),
-            // Token::LParen => {
-            //     let start = self.lexer.top.range.start;
+            Token::Enum => {
+                self.lexer.pop();
+                let name = self.parse_sym()?;
 
-            //     self.lexer.pop();
+                self.expect(&Token::LCurly)?;
+                let params = self.parse_params()?;
+                let range = self.expect_range(start, Token::RCurly)?;
 
-            //     let sym = self.parse_sym()?;
-            //     if sym == self.sym_fn {
-            //         self.parse_func(start)
-            //     } else if sym == self.sym_extern {
-            //         let name = self.parse_sym()?;
+                let id = self.push_node(range, Node::Enum { name, params });
+                self.scope_insert(name, id);
 
-            //         let mut params = Vec::new();
-            //         let params_start = self.lexer.top.range.start;
-            //         self.expect(&Token::LParen)?;
-            //         let mut index = 0;
-            //         while self.lexer.top.tok != Token::RParen {
-            //             let input_start = self.lexer.top.range.start;
-            //             self.expect(&Token::LParen)?;
-
-            //             let name = self.parse_symbol()?;
-            //             let name_sym = self.nodes[name].as_symbol().unwrap();
-            //             let ty = self.parse_type()?;
-
-            //             let range = self.expect_close_paren(input_start)?;
-
-            //             let param = self.push_node(
-            //                 range,
-            //                 Node::FuncParam {
-            //                     name: name_sym,
-            //                     ty,
-            //                     index,
-            //                 },
-            //             );
-            //             params.push(param);
-
-            //             index += 1;
-            //         }
-            //         self.expect_close_paren(params_start)?;
-
-            //         let return_ty = self.parse_type()?;
-            //         let range = self.expect_close_paren(start)?;
-
-            //         let node_id = self.push_node(
-            //             range,
-            //             Node::Extern {
-            //                 name,
-            //                 params,
-            //                 return_ty,
-            //             },
-            //         );
-
-            //         self.scope_insert(name, node_id);
-
-            //         Ok(node_id)
-            //     } else {
-            //         Err(CompileError::from_string(
-            //             format!("Unrecognized Symbol {}", self.resolve_sym_unchecked(sym)),
-            //             self.lexer.top.range,
-            //         ))
-            //     }
-            // }
+                Ok(id)
+            }
+            Token::Fn => self.parse_fn(start),
             _ => Err(CompileError::from_string(
                 "Unexpected top level",
                 self.lexer.top.range,
@@ -1433,6 +1315,20 @@ impl<'a> Parser<'a> {
             Node::PtrCast { ty, expr } => {
                 format!("(ptrcast {} {})", self.debug(*ty), self.debug(*expr))
             }
+            Node::ValueParam { name, value } => format!(
+                "({} {})",
+                name.map(|n| self.debug(n)).unwrap_or("".to_string()),
+                self.debug(*value),
+            ),
+            Node::StructLiteral { name, params } => format!(
+                "(struct-literal {} {})",
+                name.map(|n| self.debug(n)).unwrap_or("_".to_string()),
+                params
+                    .iter()
+                    .map(|p| self.debug(*p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Node::Func {
                 name,
                 scope: _,
@@ -1466,41 +1362,25 @@ impl<'a> Parser<'a> {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
-            Node::Extern {
-                name,
-                params,
-                return_ty,
-            } => {
-                let mut d = format!(
-                    "(extern {} ({}) {} ",
-                    self.debug_sym(*name),
-                    params
-                        .iter()
-                        .map(|p| self.debug(*p))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    self.debug(*return_ty)
-                );
-                d += ")";
-                d
-            }
+            Node::Enum { name, params } => format!(
+                "(enum {} ({}))",
+                self.debug_sym(*name),
+                params
+                    .iter()
+                    .map(|p| self.debug(*p))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Node::FuncParam { name, ty, index: _ } => {
                 format!("({} {})", self.debug_sym(*name), self.debug(*ty))
             }
             Node::Call {
                 name,
                 params,
-                is_macro,
                 is_indirect,
             } => format!(
                 "({} {} {})",
-                if *is_macro {
-                    "callm"
-                } else if *is_indirect {
-                    "calli"
-                } else {
-                    "call"
-                },
+                if *is_indirect { "calli" } else { "call" },
                 self.debug(*name),
                 params
                     .iter()

@@ -161,7 +161,10 @@ impl<'a> Semantic<'a> {
                     ))?
                     .iter()
                     .enumerate()
-                    .map(|(index, (ty, name))| (name, (*ty, index as u16)))
+                    .map(|(index, id)| {
+                        let (name, ty, index) = self.parser.nodes[*id].as_param().unwrap();
+                        (name, (ty, index))
+                    })
                     .collect::<BTreeMap<_, _>>();
 
                 match params.get(field_name) {
@@ -180,6 +183,31 @@ impl<'a> Semantic<'a> {
                         self.parser.ranges[id],
                     )),
                 }
+            }
+            Node::StructLiteral { name: _, params } => {
+                // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
+                self.parser.node_is_addressable[id] = true;
+
+                let coercion = match coercion {
+                    Coercion::Id(id) => match &self.types[id] {
+                        Type::Struct(params) => Some(params.clone()),
+                        _ => None, // todo(chad): this should be an error
+                    },
+                    _ => None,
+                };
+
+                for (index, param) in params.iter().enumerate() {
+                    let coercion = match &coercion {
+                        Some(params) => Coercion::Id(params[index]),
+                        None => Coercion::None,
+                    };
+
+                    self.assign_type(*param, coercion)?;
+                }
+
+                self.types[id] = Type::Struct(params.clone());
+
+                Ok(())
             }
             Node::Add(arg1, arg2)
             | Node::Sub(arg1, arg2)
@@ -271,6 +299,11 @@ impl<'a> Semantic<'a> {
                 self.types[id] = self.types[*ty].clone();
                 Ok(())
             }
+            Node::ValueParam { name: _, value } => {
+                self.assign_type(*value, coercion)?;
+                self.types[id] = self.types[*value].clone();
+                Ok(())
+            }
             Node::Return(ret_id) => {
                 let return_ty = *self.function_return_tys.borrow().last().unwrap();
                 self.assign_type(*ret_id, Coercion::Id(return_ty))?;
@@ -344,7 +377,14 @@ impl<'a> Semantic<'a> {
                         self.types[id] = ty.clone();
                     }
                     Type::Struct(params) => {
-                        for (ty, name) in params {
+                        for ty in params {
+                            self.assign_type(*ty, Coercion::None)?;
+                        }
+
+                        self.types[id] = ty.clone();
+                    }
+                    Type::Enum(params) => {
+                        for ty in params {
                             self.assign_type(*ty, Coercion::None)?;
                         }
 
@@ -358,59 +398,46 @@ impl<'a> Semantic<'a> {
             Node::Call {
                 name,
                 params,
-                is_macro,
                 is_indirect: _,
             } => {
-                if *is_macro {
-                    self.assign_type(*name, Coercion::None)?;
+                self.assign_type(*name, Coercion::None)?;
 
-                    // todo(chad): get function type from name, match param types based on it
-                    for param in params {
-                        self.assign_type(*param, Coercion::None)?;
+                let param_tys;
+                match &self.types[*name].clone() {
+                    Type::Func {
+                        return_ty,
+                        input_tys,
+                    } => {
+                        self.types[id] = self.types[*return_ty].clone();
+                        param_tys = input_tys.clone();
                     }
-
-                    self.types[id] = Type::Basic(BasicType::None);
-                    Ok(())
-                } else {
-                    self.assign_type(*name, Coercion::None)?;
-
-                    let param_tys;
-                    match &self.types[*name].clone() {
-                        Type::Func {
-                            return_ty,
-                            input_tys,
-                        } => {
-                            self.types[id] = self.types[*return_ty].clone();
-                            param_tys = input_tys.clone();
-                        }
-                        _ => {
-                            return Err(CompileError::from_string(
-                                "Failed to get type of function in call",
-                                self.parser.ranges[id],
-                            ));
-                        }
+                    _ => {
+                        return Err(CompileError::from_string(
+                            "Failed to get type of function in call",
+                            self.parser.ranges[id],
+                        ));
                     }
-
-                    for (param, param_ty) in params.iter().zip(param_tys.iter()) {
-                        self.assign_type(*param, Coercion::Id(*param_ty))?;
-                    }
-
-                    Ok(())
                 }
+
+                for (param, param_ty) in params.iter().zip(param_tys.iter()) {
+                    self.assign_type(*param, Coercion::Id(*param_ty))?;
+                }
+
+                Ok(())
             }
             Node::Struct { name: _, params } => {
                 for param in params {
                     self.assign_type(*param, Coercion::None)?;
                 }
-                self.types[id] = Type::Struct(
-                    params
-                        .iter()
-                        .map(|p| {
-                            let param = self.parser.nodes[*p].param_field_name().unwrap();
-                            (*p, param)
-                        })
-                        .collect(),
-                );
+                self.types[id] = Type::Struct(params.clone());
+
+                Ok(())
+            }
+            Node::Enum { name: _, params } => {
+                for param in params {
+                    self.assign_type(*param, Coercion::None)?;
+                }
+                self.types[id] = Type::Enum(params.clone());
 
                 Ok(())
             }
