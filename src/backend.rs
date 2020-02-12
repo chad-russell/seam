@@ -29,6 +29,8 @@ pub struct FuncPtr(pub *const u8);
 unsafe impl Send for FuncPtr {}
 unsafe impl Sync for FuncPtr {}
 
+const ENUM_TAG_SIZE_BYTES: u32 = 2;
+
 // todo(chad): replace with evmap or similar?
 lazy_static! {
     pub static ref FUNC_PTRS: Arc<Mutex<BTreeMap<Sym, FuncPtr>>> =
@@ -66,6 +68,18 @@ pub enum Value {
     // Address(CraneliftValue, u32),
 }
 
+impl Into<Value> for CraneliftValue {
+    fn into(self) -> Value {
+        Value::Value(self)
+    }
+}
+
+impl Into<Value> for &CraneliftValue {
+    fn into(self) -> Value {
+        Value::Value(*self)
+    }
+}
+
 impl Value {
     fn as_addr(&self) -> Value {
         match self {
@@ -75,24 +89,6 @@ impl Value {
         .unwrap()
         .clone()
     }
-
-    fn as_value(&self) -> CraneliftValue {
-        *match self {
-            Value::Value(v) => Some(v),
-            _ => None,
-        }
-        .unwrap()
-    }
-
-    // findme
-    // let offset = backend.builder.ins().iconst(types::I64, *offset as i64);
-    // backend.builder.ins().iadd(*addr, offset)
-
-    // findme
-    // backend
-    //     .builder
-    //     .ins()
-    //     .stack_addr(backend.module.isa().pointer_type(), *slot, 0)
 
     fn as_value_relaxed<'a, 'b, 'c>(
         &self,
@@ -269,7 +265,7 @@ impl<'a> Backend<'a> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(*name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                println!("compiling func {}", func_name);
+                // println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
@@ -325,7 +321,7 @@ impl<'a> Backend<'a> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                println!("{}", ctx.func.display(None));
+                // println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -393,6 +389,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
             Type::Func { .. } => self.module.isa().pointer_bytes() as _,
             Type::Struct(params) => params.iter().map(|p| self.type_size(*p)).sum(),
+            Type::Enum(params) => {
+                let biggest_param = params.iter().map(|p| self.type_size(*p)).max().unwrap_or(0);
+                let tag_size = ENUM_TAG_SIZE_BYTES;
+                tag_size + biggest_param
+            }
             _ => todo!("type_size"),
         }
     }
@@ -410,10 +411,23 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
         match &self.semantic.parser.nodes[id] {
             Node::Load(load_id) => self.rvalue_is_ptr(*load_id),
+            Node::ValueParam { value, .. } => self.rvalue_is_ptr(*value),
             Node::Field { .. } => true,
             Node::Let { .. } => true,
             _ => false,
         }
+    }
+
+    fn as_value(&mut self, id: Id) -> CraneliftValue {
+        match self.values[id].clone() {
+            Value::Value(v) => Some(v),
+            Value::FuncRef(sym) => Some(self.builder.ins().iconst(types::I64, sym as i64)),
+            _ => None,
+        }
+        .expect(&format!(
+            "Cannot convert {:?} into a CraneliftValue",
+            &self.values[id]
+        ))
     }
 
     fn store(&mut self, id: Id, dest: &Value) {
@@ -440,8 +454,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     fn store_copy(&mut self, id: Id, dest: &Value) {
         let size = self.type_size(id);
 
-        let source_value = self.values[id].as_value();
-        let dest_value = dest.as_value();
+        let source_value = self.as_value(id);
+        let dest_value = dest.as_value_relaxed(self);
 
         self.builder.emit_small_memcpy(
             self.module.isa().frontend_config(),
@@ -464,6 +478,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             let ty = &self.semantic.types[id];
             let ty = match ty {
                 Type::Struct(_) => self.module.isa().pointer_type(),
+                Type::Enum(_) => self.module.isa().pointer_type(),
                 _ => ty.try_into().unwrap(),
             };
 
@@ -472,7 +487,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 _ => panic!("Could not get cranelift value: {:?}", &self.values[id]),
             }
         } else {
-            self.values[id].as_value()
+            self.as_value(id)
         }
     }
 
@@ -536,6 +551,49 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::StructLiteral { name: _, params } => {
+                // if this typechecked as an enum, handle things a bit differently
+                match &self.semantic.types[id] {
+                    Type::Enum(_) => {
+                        assert_eq!(params.len(), 1);
+                        let param = params[0];
+                        let size = self.type_size(param) + ENUM_TAG_SIZE_BYTES;
+
+                        let slot = self.builder.create_stack_slot(StackSlotData {
+                            kind: StackSlotKind::ExplicitSlot,
+                            size,
+                            offset: None,
+                        });
+                        let addr = self.builder.ins().stack_addr(
+                            self.module.isa().pointer_type(),
+                            slot,
+                            0,
+                        );
+
+                        self.values[id] = Value::Value(addr);
+
+                        let index = match &self.semantic.parser.nodes[param] {
+                            Node::ValueParam { index, .. } => index,
+                            _ => unreachable!(),
+                        };
+                        let tag_value = self.builder.ins().iconst(types::I16, *index as i64);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), tag_value, addr, 0);
+
+                        let tag_size_value = self
+                            .builder
+                            .ins()
+                            .iconst(types::I64, ENUM_TAG_SIZE_BYTES as i64);
+                        let addr = self.builder.ins().iadd(addr, tag_size_value);
+
+                        self.compile_id(param)?;
+                        self.store(param, &addr.into());
+
+                        return Ok(());
+                    }
+                    _ => (),
+                };
+
                 // todo(chad): @Optimization: this is about the slowest thing we could ever do, but works great.
                 // Come back later once everything is working and make it fast
                 let size = self.type_size(id);
@@ -583,10 +641,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             }
             Node::Let {
                 name: _, // Sym
-                ty,      // Id
+                ty: _,   // Id
                 expr,    // Id
             } => {
-                let size = self.type_size(*ty);
+                let size = self.type_size(id);
                 let slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
@@ -646,8 +704,9 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::Call {
-                name,   // Id
-                params, // Vec<Id>
+                name,      // Id
+                ct_params, // Vec<Id>
+                params,    // Vec<Id>
                 is_indirect: _,
             } => {
                 // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
@@ -803,7 +862,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
-            Node::FuncParam {
+            Node::DeclParam {
                 name: _, // Sym
                 ty: _,   // Id
                 index,   // u16
@@ -815,6 +874,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::ValueParam {
                 name: _, // Sym
                 value,
+                ..
             } => {
                 self.compile_id(*value)?;
                 self.values[id] = self.values[*value];
@@ -824,6 +884,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 base,
                 field_name: _,
                 field_index,
+                is_assignment,
             } => {
                 self.compile_id(*base)?;
 
@@ -833,21 +894,31 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     _ => (*base, false),
                 };
 
-                let offset = self.semantic.types[unpointered_ty]
-                    .as_struct_params()
-                    .unwrap()
-                    .iter()
-                    .enumerate()
-                    .map(|(_index, id)| {
-                        let (_name, ty, _index) =
-                            self.semantic.parser.nodes[*id].as_param().unwrap();
-                        ty
-                    })
-                    .take(*field_index as usize)
-                    .map(|ty| self.type_size(ty))
-                    .sum::<u32>();
+                // all field accesses on enums have the same offset -- just the tag size in bytes
+                let is_enum = match &self.semantic.types[unpointered_ty] {
+                    Type::Enum(_) => true,
+                    _ => false,
+                };
 
-                let mut base = self.values[*base].as_value();
+                let offset = if is_enum {
+                    ENUM_TAG_SIZE_BYTES
+                } else {
+                    self.semantic.types[unpointered_ty]
+                        .as_struct_params()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(_index, id)| {
+                            let (_name, ty, _index) =
+                                self.semantic.parser.nodes[*id].as_param().unwrap();
+                            ty
+                        })
+                        .take(*field_index as usize)
+                        .map(|ty| self.type_size(ty))
+                        .sum::<u32>()
+                };
+
+                let mut base = self.as_value(*base);
 
                 if loaded {
                     // if we are doing field access through a pointer, do an extra load
@@ -859,12 +930,21 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     );
                 }
 
+                if is_enum && *is_assignment {
+                    let tag_value = self.builder.ins().iconst(types::I16, *field_index as i64);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), tag_value, base, 0);
+                } else {
+                    // todo(chad): @Correctness check the tag, assert it is correct
+                }
+
                 if offset != 0 {
                     let offset = self.builder.ins().iconst(types::I64, offset as i64);
                     base = self.builder.ins().iadd(base, offset);
                 }
 
-                self.values[id] = Value::Value(base);
+                self.values[id] = base.into();
 
                 Ok(())
             }
@@ -881,9 +961,9 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 }
 
 impl TryInto<types::Type> for &Type {
-    type Error = &'static str;
+    type Error = String;
 
-    fn try_into(self) -> Result<types::Type, &'static str> {
+    fn try_into(self) -> Result<types::Type, String> {
         match self {
             &Type::Basic(bt) => match bt {
                 BasicType::Bool => Ok(types::I32), // todo(chad): I8?
@@ -893,11 +973,11 @@ impl TryInto<types::Type> for &Type {
                 BasicType::I64 => Ok(types::I64),
                 BasicType::F32 => Ok(types::F32),
                 BasicType::F64 => Ok(types::F64),
-                _ => Err("Could not convert type"),
+                _ => Err(format!("Could not convert type {:?}", &self)),
             },
             &Type::Func { .. } => Ok(types::I64),
             &Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
-            _ => Err("Could not convert type"),
+            _ => Err(format!("Could not convert type {:?}", &self)),
         }
     }
 }

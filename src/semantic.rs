@@ -26,8 +26,9 @@ pub struct Semantic<'a> {
     pub parser: Parser<'a>,
     pub types: Vec<Type>,
     pub topo: Vec<Id>,
-    // todo(chad): probably not a big deal, but maybe try to find a workaround
+    // todo(chad): probably not a big deal, but try to find a workaround
     pub function_return_tys: Rc<RefCell<Vec<Id>>>,
+    pub lhs_assign: bool,
 }
 
 impl<'a> Semantic<'a> {
@@ -38,6 +39,7 @@ impl<'a> Semantic<'a> {
             types,
             topo: Vec::new(),
             function_return_tys: Rc::new(RefCell::new(Vec::new())),
+            lhs_assign: false,
         }
     }
 
@@ -70,11 +72,18 @@ impl<'a> Semantic<'a> {
             Node::IntLiteral(_) => {
                 let bt = match coercion {
                     Coercion::None => BasicType::I64,
-                    Coercion::Id(id) => match &self.types[id] {
-                        Type::Basic(bt) => *bt,
+                    Coercion::Id(cid) => match self.types[cid].clone() {
+                        Type::Basic(bt) => bt,
+                        Type::Type => {
+                            self.types[cid] = Type::Basic(BasicType::I64);
+                            BasicType::I64
+                        }
                         _ => {
                             return Err(CompileError::from_string(
-                                "Cannot convert int literal into type",
+                                format!(
+                                    "Cannot convert int literal into type {:?}",
+                                    &self.types[id]
+                                ),
                                 self.parser.ranges[id],
                             ));
                         }
@@ -86,7 +95,7 @@ impl<'a> Semantic<'a> {
                 match bt {
                     BasicType::Bool | BasicType::None => {
                         return Err(CompileError::from_string(
-                            "Cannot convert int literal into type",
+                            format!("Cannot convert int literal into type {:?}", &self.types[id]),
                             self.parser.ranges[id],
                         ));
                     }
@@ -108,17 +117,39 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Let { name: _, ty, expr } => {
-                self.assign_type(*ty, Coercion::None)?;
+                let coercion = match ty {
+                    Some(ty) => {
+                        self.assign_type(*ty, Coercion::None)?;
+                        Coercion::Id(*ty)
+                    }
+                    None => Coercion::None,
+                };
+
                 if expr.is_some() {
-                    self.assign_type(expr.unwrap(), Coercion::Id(*ty))?;
+                    self.assign_type(expr.unwrap(), coercion)?;
                 }
 
-                self.types[id] = self.types[*ty].clone();
-
-                Ok(())
+                match (ty, expr) {
+                    (Some(ty), _) => {
+                        self.types[id] = self.types[*ty].clone();
+                        Ok(())
+                    }
+                    (_, Some(expr)) => {
+                        self.types[id] = self.types[*expr].clone();
+                        Ok(())
+                    }
+                    (None, None) => Err(CompileError::from_string(
+                        "'let' binding with unbound type and no expression",
+                        self.parser.ranges[id],
+                    )),
+                }
             }
             Node::Set { name, expr, .. } => {
+                let saved_lhs_assign = self.lhs_assign;
+                self.lhs_assign = true;
                 self.assign_type(*name, Coercion::None)?;
+                self.lhs_assign = saved_lhs_assign;
+
                 self.assign_type(*expr, Coercion::Id(*name))?;
 
                 // if name is a load, then we are doing a store
@@ -140,6 +171,7 @@ impl<'a> Semantic<'a> {
                 base,
                 field_name,
                 field_index: _,
+                ..
             } => {
                 self.assign_type(*base, Coercion::None)?;
                 self.parser.node_is_addressable[*base] = true;
@@ -150,18 +182,27 @@ impl<'a> Semantic<'a> {
                     _ => *base,
                 };
 
+                if self.lhs_assign {
+                    match self.parser.nodes.get_mut(id).unwrap() {
+                        Node::Field { is_assignment, .. } => {
+                            *is_assignment = true;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
                 let params = self.types[unpointered_ty]
                     .as_struct_params()
                     .ok_or(CompileError::from_string(
                         format!(
-                            "Expected struct, got {:?}",
+                            "Expected struct or enum, got {:?}",
                             self.parser.debug(unpointered_ty)
                         ),
                         self.parser.ranges[*base],
                     ))?
                     .iter()
                     .enumerate()
-                    .map(|(index, id)| {
+                    .map(|(_index, id)| {
                         let (name, ty, index) = self.parser.nodes[*id].as_param().unwrap();
                         (name, (ty, index))
                     })
@@ -188,24 +229,73 @@ impl<'a> Semantic<'a> {
                 // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
                 self.parser.node_is_addressable[id] = true;
 
-                let coercion = match coercion {
+                // todo(chad): @Cleanup this is ugly
+                let (params_map, lit_ty) = match coercion {
                     Coercion::Id(id) => match &self.types[id] {
-                        Type::Struct(params) => Some(params.clone()),
-                        _ => None, // todo(chad): this should be an error
+                        Type::Struct(params) => (
+                            Some(
+                                params
+                                    .iter()
+                                    .map(|p| {
+                                        let (name, id, index) =
+                                            self.parser.nodes[*p].as_param().unwrap();
+                                        (name, (id, index))
+                                    })
+                                    .collect::<BTreeMap<_, _>>(),
+                            ),
+                            Some(id),
+                        ),
+                        Type::Enum(params) => (
+                            Some(
+                                params
+                                    .iter()
+                                    .map(|p| {
+                                        let (name, id, index) =
+                                            self.parser.nodes[*p].as_param().unwrap();
+                                        (name, (id, index))
+                                    })
+                                    .collect::<BTreeMap<_, _>>(),
+                            ),
+                            Some(id),
+                        ),
+                        _ => {
+                            return Err(CompileError::from_string(
+                                "Cannot match struct literal with this type",
+                                self.parser.ranges[id],
+                            ));
+                        }
                     },
-                    _ => None,
+                    _ => (None, None),
                 };
 
-                for (index, param) in params.iter().enumerate() {
-                    let coercion = match &coercion {
-                        Some(params) => Coercion::Id(params[index]),
+                for param in params {
+                    let (name, _, _) = self.parser.nodes[*param].as_value_param().unwrap();
+
+                    let coercion = match &params_map {
+                        Some(params_map) => {
+                            let (id, param_index) = params_map
+                                .get(&name.expect("todo: handle missing name"))
+                                .expect("todo: handle wrong param");
+
+                            match self.parser.nodes.get_mut(*param).unwrap() {
+                                Node::ValueParam { index, .. } => {
+                                    *index = *param_index;
+                                }
+                                _ => unreachable!(),
+                            }
+
+                            Coercion::Id(*id)
+                        }
                         None => Coercion::None,
                     };
 
                     self.assign_type(*param, coercion)?;
                 }
 
-                self.types[id] = Type::Struct(params.clone());
+                match lit_ty {
+                    Some(ty_id) => self.types[id] = self.types[ty_id].clone(),
+                    None => self.types[id] = Type::Struct(params.clone()),
+                }
 
                 Ok(())
             }
@@ -261,10 +351,16 @@ impl<'a> Semantic<'a> {
             Node::Func {
                 name: _,   //: Sym,
                 scope: _,  //: Id,
-                params,    // : Vec<Id>,
+                ct_params, //: Vec<Id>,
+                params,    //: Vec<Id>,
                 return_ty, //: Id,
                 stmts,     //: Vec<Id>,
+                is_specialized,
             } => {
+                if !ct_params.is_empty() && !is_specialized {
+                    return Ok(());
+                }
+
                 self.assign_type(*return_ty, Coercion::None)?;
 
                 let function_return_tys = self.function_return_tys.clone();
@@ -290,7 +386,7 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::FuncParam {
+            Node::DeclParam {
                 name: _,  // Sym
                 ty,       // Id
                 index: _, //  u16
@@ -299,7 +395,7 @@ impl<'a> Semantic<'a> {
                 self.types[id] = self.types[*ty].clone();
                 Ok(())
             }
-            Node::ValueParam { name: _, value } => {
+            Node::ValueParam { name: _, value, .. } => {
                 self.assign_type(*value, coercion)?;
                 self.types[id] = self.types[*value].clone();
                 Ok(())
@@ -365,6 +461,9 @@ impl<'a> Semantic<'a> {
                     Type::String => {
                         self.types[id] = Type::String;
                     }
+                    Type::Type => {
+                        self.types[id] = Type::Type;
+                    }
                     Type::Func {
                         return_ty,
                         input_tys,
@@ -393,35 +492,73 @@ impl<'a> Semantic<'a> {
                     Type::Unassigned => unreachable!(),
                 }
 
+                // if we match against a Type, then set it to whatever we are
+                // todo(chad): this is temporary, need to do the whole array matching thing in the future
+                match coercion {
+                    Coercion::Id(cid) => match self.types[cid].clone() {
+                        Type::Type => {
+                            println!("setting {} to {:?}", cid, &self.types[id]);
+                            self.types[cid] = self.types[id].clone();
+                        }
+                        _ => (),
+                    },
+                    _ => (),
+                }
+
                 Ok(())
             }
             Node::Call {
                 name,
+                ct_params,
                 params,
                 is_indirect: _,
             } => {
-                self.assign_type(*name, Coercion::None)?;
+                let resolved_func = self.resolve(*name)?;
+                let func = self.parser.nodes[resolved_func].clone();
 
-                let param_tys;
-                match &self.types[*name].clone() {
-                    Type::Func {
-                        return_ty,
-                        input_tys,
-                    } => {
-                        self.types[id] = self.types[*return_ty].clone();
-                        param_tys = input_tys.clone();
-                    }
+                let is_ct = match &func {
+                    Node::Func { ct_params, .. } => ct_params.len() > 0,
                     _ => {
                         return Err(CompileError::from_string(
-                            "Failed to get type of function in call",
+                            "Cannot call a non-func",
                             self.parser.ranges[id],
-                        ));
+                        ))
+                    }
+                };
+
+                if is_ct {
+                    // match given ct_params against declared ct_params
+                    let given = ct_params;
+                    let decl = match &func {
+                        Node::Func { ct_params, .. } => ct_params.clone(),
+                        _ => unreachable!(),
+                    };
+
+                    for (g, d) in given.iter().zip(decl.iter()) {
+                        self.assign_type(*d, Coercion::None)?;
+                        self.assign_type(*g, Coercion::Id(*d))?;
                     }
                 }
 
-                for (param, param_ty) in params.iter().zip(param_tys.iter()) {
-                    self.assign_type(*param, Coercion::Id(*param_ty))?;
+                match self.parser.nodes.get_mut(resolved_func).unwrap() {
+                    Node::Func { is_specialized, .. } => {
+                        *is_specialized = true;
+                    }
+                    _ => unreachable!(),
                 }
+
+                let given = params;
+                let decl = match func {
+                    Node::Func { params, .. } => params.clone(),
+                    _ => unreachable!(),
+                };
+
+                for (g, d) in given.iter().zip(decl.iter()) {
+                    // self.assign_type(*d, Coercion::None)?;
+                    self.assign_type(*g, Coercion::Id(*d))?;
+                }
+
+                self.assign_type(*name, Coercion::None)?;
 
                 Ok(())
             }
@@ -448,6 +585,13 @@ impl<'a> Semantic<'a> {
                 ),
                 self.parser.ranges[id],
             )),
+        }
+    }
+
+    fn resolve(&self, id: Id) -> Result<Id, CompileError> {
+        match &self.parser.nodes[id] {
+            Node::Symbol(sym) => self.scope_get(*sym, id),
+            _ => Ok(id),
         }
     }
 
