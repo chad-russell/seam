@@ -29,6 +29,7 @@ pub struct Semantic<'a> {
     // todo(chad): probably not a big deal, but try to find a workaround
     pub function_return_tys: Rc<RefCell<Vec<Id>>>,
     pub lhs_assign: bool,
+    pub type_matches: Vec<Vec<Id>>,
 }
 
 impl<'a> Semantic<'a> {
@@ -40,6 +41,7 @@ impl<'a> Semantic<'a> {
             topo: Vec::new(),
             function_return_tys: Rc::new(RefCell::new(Vec::new())),
             lhs_assign: false,
+            type_matches: Vec::new(),
         }
     }
 
@@ -65,20 +67,26 @@ impl<'a> Semantic<'a> {
             Node::Symbol(sym) => {
                 let resolved = self.scope_get(*sym, id)?;
                 self.assign_type(resolved, coercion)?;
-                self.types[id] = self.types[resolved].clone();
+                self.match_types(id, resolved);
                 self.parser.node_is_addressable[id] = self.parser.node_is_addressable[resolved];
                 Ok(())
             }
             Node::IntLiteral(_) => {
+                self.types[id] = Type::Basic(BasicType::IntLiteral);
+
                 let bt = match coercion {
-                    Coercion::None => BasicType::I64,
-                    Coercion::Id(cid) => match self.types[cid].clone() {
-                        Type::Basic(bt) => bt,
-                        Type::Type => {
-                            self.types[cid] = Type::Basic(BasicType::I64);
-                            BasicType::I64
-                        }
-                        _ => {
+                    Coercion::None => Some(BasicType::I64),
+                    Coercion::Id(cid) => {
+                        self.match_types(id, cid);
+                        None
+                    }
+                    Coercion::Basic(bt) => Some(bt),
+                };
+
+                // todo(chad): check integer for overflow
+                if let Some(bt) = bt {
+                    match bt {
+                        BasicType::Bool | BasicType::None => {
                             return Err(CompileError::from_string(
                                 format!(
                                     "Cannot convert int literal into type {:?}",
@@ -87,20 +95,9 @@ impl<'a> Semantic<'a> {
                                 self.parser.ranges[id],
                             ));
                         }
-                    },
-                    Coercion::Basic(bt) => bt,
-                };
-
-                // todo(chad): check integer for overflow
-                match bt {
-                    BasicType::Bool | BasicType::None => {
-                        return Err(CompileError::from_string(
-                            format!("Cannot convert int literal into type {:?}", &self.types[id]),
-                            self.parser.ranges[id],
-                        ));
-                    }
-                    _ => self.types[id] = Type::Basic(bt),
-                };
+                        _ => self.types[id] = Type::Basic(bt),
+                    };
+                }
 
                 Ok(())
             }
@@ -131,11 +128,11 @@ impl<'a> Semantic<'a> {
 
                 match (ty, expr) {
                     (Some(ty), _) => {
-                        self.types[id] = self.types[*ty].clone();
+                        self.match_types(id, *ty);
                         Ok(())
                     }
                     (_, Some(expr)) => {
-                        self.types[id] = self.types[*expr].clone();
+                        self.match_types(id, *expr);
                         Ok(())
                     }
                     (None, None) => Err(CompileError::from_string(
@@ -216,7 +213,7 @@ impl<'a> Semantic<'a> {
                             _ => unreachable!(),
                         }
 
-                        self.types[id] = self.types[*ty].clone();
+                        self.match_types(id, *ty);
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
@@ -293,7 +290,7 @@ impl<'a> Semantic<'a> {
                 }
 
                 match lit_ty {
-                    Some(ty_id) => self.types[id] = self.types[ty_id].clone(),
+                    Some(ty_id) => self.match_types(id, ty_id),
                     None => self.types[id] = Type::Struct(params.clone()),
                 }
 
@@ -306,18 +303,10 @@ impl<'a> Semantic<'a> {
                 self.assign_type(*arg1, coercion)?;
                 self.assign_type(*arg2, coercion.or_id(*arg1))?;
 
-                let ty1: Type = self.types[*arg1].clone();
-                let ty2: Type = self.types[*arg2].clone();
+                self.match_types(*arg1, *arg2);
+                self.match_types(id, *arg1);
 
-                if !self.types_match_ty(&ty1, &ty2) {
-                    Err(CompileError::from_string(
-                        format!("Type mismatch: {:?} vs {:?}", ty1, ty2),
-                        self.parser.ranges[id],
-                    ))
-                } else {
-                    self.types[id] = ty1;
-                    Ok(())
-                }
+                Ok(())
             }
             Node::LessThan(arg1, arg2)
             | Node::GreaterThan(arg1, arg2)
@@ -325,18 +314,10 @@ impl<'a> Semantic<'a> {
                 self.assign_type(*arg1, coercion)?;
                 self.assign_type(*arg2, coercion.or_id(*arg1))?;
 
-                let ty1: Type = self.types[*arg1].clone();
-                let ty2: Type = self.types[*arg2].clone();
+                self.match_types(*arg1, *arg2);
+                self.match_types(id, *arg1);
 
-                if !self.types_match_ty(&ty1, &ty2) {
-                    Err(CompileError::from_string(
-                        format!("Type mismatch: {:?} vs {:?}", ty1, ty2),
-                        self.parser.ranges[id],
-                    ))
-                } else {
-                    self.types[id] = Type::Basic(BasicType::Bool);
-                    Ok(())
-                }
+                Ok(())
             }
             Node::And(arg1, arg2) | Node::Or(arg1, arg2) => {
                 self.assign_type(*arg1, coercion)?;
@@ -375,6 +356,7 @@ impl<'a> Semantic<'a> {
 
                 for &stmt in stmts.iter() {
                     self.assign_type(stmt, Coercion::None)?;
+                    self.unify_types()?;
                 }
 
                 self.types[id] = Type::Func {
@@ -392,18 +374,18 @@ impl<'a> Semantic<'a> {
                 index: _, //  u16
             } => {
                 self.assign_type(*ty, Coercion::None)?;
-                self.types[id] = self.types[*ty].clone();
+                self.match_types(id, *ty);
                 Ok(())
             }
             Node::ValueParam { name: _, value, .. } => {
                 self.assign_type(*value, coercion)?;
-                self.types[id] = self.types[*value].clone();
+                self.match_types(id, *value);
                 Ok(())
             }
             Node::Return(ret_id) => {
                 let return_ty = *self.function_return_tys.borrow().last().unwrap();
                 self.assign_type(*ret_id, Coercion::Id(return_ty))?;
-                self.types[id] = self.types[*ret_id].clone();
+                self.match_types(id, *ret_id);
                 Ok(())
             }
             Node::If(cond_id, true_id, false_id) => {
@@ -415,7 +397,7 @@ impl<'a> Semantic<'a> {
                 }
 
                 // todo(chad): enforce unit type for single-armed if stmts
-                self.types[id] = self.types[*true_id].clone();
+                self.match_types(id, *true_id);
 
                 Ok(())
             }
@@ -440,7 +422,7 @@ impl<'a> Semantic<'a> {
 
                 match &self.types[*load_id] {
                     Type::Pointer(pid) => {
-                        self.types[id] = self.types[*pid].clone();
+                        self.match_types(id, *pid);
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
@@ -497,8 +479,7 @@ impl<'a> Semantic<'a> {
                 match coercion {
                     Coercion::Id(cid) => match self.types[cid].clone() {
                         Type::Type => {
-                            println!("setting {} to {:?}", cid, &self.types[id]);
-                            self.types[cid] = self.types[id].clone();
+                            self.match_types(cid, id);
                         }
                         _ => (),
                     },
@@ -518,12 +499,17 @@ impl<'a> Semantic<'a> {
 
                 let is_ct = match &func {
                     Node::Func { ct_params, .. } => ct_params.len() > 0,
-                    _ => {
-                        return Err(CompileError::from_string(
-                            "Cannot call a non-func",
-                            self.parser.ranges[id],
-                        ))
-                    }
+                    _ => match &self.types[resolved_func] {
+                        // if it's a pure function type (already specialized) then it's not ct
+                        Type::Func { .. } => false,
+                        // otherwise what the heck are we trying to call?
+                        _ => {
+                            return Err(CompileError::from_string(
+                                &format!("Cannot call a non-func: {:?}", &self.parser.nodes[id]),
+                                self.parser.ranges[id],
+                            ))
+                        }
+                    },
                 };
 
                 if is_ct {
@@ -544,21 +530,29 @@ impl<'a> Semantic<'a> {
                     Node::Func { is_specialized, .. } => {
                         *is_specialized = true;
                     }
-                    _ => unreachable!(),
+                    _ => (),
                 }
 
                 let given = params;
                 let decl = match func {
                     Node::Func { params, .. } => params.clone(),
-                    _ => unreachable!(),
+                    _ => match &self.types[resolved_func] {
+                        Type::Func { input_tys, .. } => input_tys.clone(),
+                        _ => unreachable!(),
+                    },
                 };
 
                 for (g, d) in given.iter().zip(decl.iter()) {
-                    // self.assign_type(*d, Coercion::None)?;
+                    self.assign_type(*d, Coercion::None)?;
                     self.assign_type(*g, Coercion::Id(*d))?;
                 }
 
                 self.assign_type(*name, Coercion::None)?;
+
+                match self.types[*name].clone() {
+                    Type::Func { return_ty, .. } => self.match_types(id, return_ty),
+                    _ => (),
+                }
 
                 Ok(())
             }
@@ -595,11 +589,90 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn types_match_ty(&self, ty1: &Type, ty2: &Type) -> bool {
-        match (ty1, ty2) {
-            (Type::Pointer(pt1), Type::Pointer(pt2)) => self.types[*pt1] == self.types[*pt2],
-            _ => ty1 == ty2,
+    fn find_type_array_index(&mut self, id: Id) -> usize {
+        for (index, m) in self.type_matches.iter().enumerate() {
+            if m.contains(&id) {
+                return index;
+            }
         }
+
+        self.type_matches.push(vec![id]);
+        self.type_matches.len() - 1
+    }
+
+    fn type_specificity(&self, id: Id) -> i16 {
+        match &self.types[id] {
+            Type::Unassigned | Type::Type => 0,
+            Type::Basic(BasicType::IntLiteral) => 1,
+            _ => 2,
+        }
+    }
+
+    fn match_types(&mut self, ty1: Id, ty2: Id) {
+        match (self.types[ty1].clone(), self.types[ty2].clone()) {
+            (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => {
+                // todo(chad): check whether it's actually assgnable (float, bool, overflow, etc.)
+                self.types[ty1] = Type::Basic(bt);
+            }
+            (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => {
+                // todo(chad): check whether it's actually assgnable (float, bool, overflow, etc.)
+                self.types[ty2] = Type::Basic(bt);
+            }
+            (_, _) => (),
+        }
+
+        match self.types[ty1].clone() {
+            Type::Type | Type::Unassigned => (),
+            _ => {
+                self.types[ty2] = self.types[ty1].clone();
+                return;
+            }
+        }
+        match self.types[ty2].clone() {
+            Type::Type | Type::Unassigned => (),
+            _ => {
+                self.types[ty1] = self.types[ty2].clone();
+                return;
+            }
+        }
+
+        let id1 = self.find_type_array_index(ty1);
+        let id2 = self.find_type_array_index(ty2);
+
+        if id1 != id2 {
+            let lower = id1.min(id2);
+            let upper = id1.max(id2);
+
+            // todo(chad): partition or something
+            let upper_matches = self.type_matches[upper].clone();
+            self.type_matches[lower].extend(upper_matches);
+            self.type_matches.remove(upper);
+        }
+    }
+
+    fn unify_types(&mut self) -> Result<(), CompileError> {
+        for uid in 0..self.type_matches.len() {
+            let ty = self.type_matches[uid]
+                .iter()
+                .map(|&ty| self.type_specificity(ty))
+                .filter(|&spec| spec > 0)
+                .max();
+
+            // set all types to whatever we unified to
+            if let Some(ty) = ty {
+                for id in self.type_matches[uid].iter() {
+                    self.types[*id] = self.types[ty as usize].clone();
+                }
+            } else {
+                return Err(CompileError::from_string(
+                    "Could not unify types",
+                    self.parser.ranges[self.type_matches[uid][0]],
+                ));
+            }
+        }
+
+        self.type_matches.clear();
+        Ok(())
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {

@@ -41,6 +41,7 @@ pub type Id = usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BasicType {
     Bool,
+    IntLiteral,
     I8,
     I16,
     I32,

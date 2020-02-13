@@ -1,35 +1,35 @@
-// struct Point {
-//     x: i64,
-//     y: i64,
-// }
-
-// struct Line {
-//     start: *Point,
-//     end: *Point,
-// }
-
-// struct Foo {
-//     value: i64,
-//     bar: *Bar,
-// }
-
-// struct Bar {
-//     value: i64,
-//     baz: *Baz,
-// }
-
-// struct Baz {
-//     value: i64,
-//     qux: *Qux,
-// }
-
-// struct Qux {
-//     value: **i64,
-// }
-
-fn poly_id!(P: Type)(x: P) P {
-    return x;
+struct Point {
+    x: i64,
+    y: i64,
 }
+
+struct Line {
+    start: *Point,
+    end: *Point,
+}
+
+struct Foo {
+    value: i64,
+    bar: *Bar,
+}
+
+struct Bar {
+    value: i64,
+    baz: *Baz,
+}
+
+struct Baz {
+    value: i64,
+    qux: *Qux,
+}
+
+struct Qux {
+    value: **i64,
+}
+
+// fn poly_id!(P: Type)(x: P) P {
+//     return x;
+// }
 
 // fn poly_call!(T: Type, R: Type)(f: fn(T) -> R, val: T) -> R {
 //     f(val)
@@ -40,17 +40,24 @@ fn poly_id!(P: Type)(x: P) P {
 // }
 
 fn main() i64 {
-    return poly_id(3);
+    // return poly_id(3);
+    // return test_fn_ptr();
+    // return cpi_test();
 }
+
+// fn simple() i64 {
+//     let a: i64 = 3;
+//     return a;
+// }
 
 // fn test_fn_ptr() i64 {
 //     let f: fn() i64 = ---;
-//     f = r3;
+//     f = simple;
 //     return f();
 // }
 
 // fn set(x: *i64) i64 {
-//     let xx = x;
+//     let xx: *i64 = x;
 //     ^xx = 3;
 //     return 999;
 // }

@@ -394,7 +394,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let tag_size = ENUM_TAG_SIZE_BYTES;
                 tag_size + biggest_param
             }
-            _ => todo!("type_size"),
+            _ => todo!("type_size for {:?}", &self.semantic.types[id]),
         }
     }
 
