@@ -42,7 +42,7 @@ fn poly_call!(T: Type)(f: fn(n: T) T, val: T) T {
 
 fn main() i64 {
     // return poly_id(3);
-    return poly_call(poly_id, 15);
+    // return poly_call(simple, 15);
 
     // return test_fn_ptr();
     // return cpi_test();

@@ -346,8 +346,6 @@ impl<'a> Semantic<'a> {
                 stmts,     //: Vec<Id>,
                 is_specialized,
             } => {
-                self.topo.push(id);
-
                 if !ct_params.is_empty() && !is_specialized {
                     return Ok(());
                 }
@@ -373,6 +371,8 @@ impl<'a> Semantic<'a> {
                     return_ty: *return_ty,
                     input_tys: params.clone(),
                 };
+
+                self.topo.push(id);
 
                 Ok(())
             }
@@ -675,7 +675,11 @@ impl<'a> Semantic<'a> {
                     }
                     _ => (),
                 }
-                println!("setting all to {:?}", self.parser.debug(ty as _));
+                println!(
+                    "setting all to {:?} (from {:?})",
+                    self.types[ty as usize],
+                    self.parser.debug(ty as _)
+                );
 
                 for id in self.type_matches[uid].iter() {
                     self.types[*id] = self.types[ty as usize].clone();
