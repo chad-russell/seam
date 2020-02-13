@@ -469,10 +469,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
     fn rvalue(&mut self, id: Id) -> CraneliftValue {
         let rvalue_is_ptr = self.rvalue_is_ptr(id);
-        // println!(
-        //     "{:?} needs storage? {}",
-        //     &self.semantic.parser.nodes[id], rvalue_is_ptr
-        // );
 
         if rvalue_is_ptr {
             let ty = &self.semantic.types[id];
@@ -516,7 +512,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                         BasicType::I32 => self.builder.ins().iconst(types::I32, *i),
                         BasicType::I16 => self.builder.ins().iconst(types::I16, *i),
                         BasicType::I8 => self.builder.ins().iconst(types::I8, *i),
-                        _ => todo!("handle other type"),
+                        _ => todo!(
+                            "handle other type: {:?} {:?}",
+                            &self.semantic.types[id],
+                            &self.semantic.parser.nodes[id]
+                        ),
                     },
                     _ => todo!("expected basic type"),
                 };
@@ -953,7 +953,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             _ => Err(CompileError::from_string(
-                format!("Unhandled node: {}", self.semantic.parser.debug(id)),
+                format!(
+                    "Unhandled node: {:?} ({})",
+                    &self.semantic.parser.nodes[id],
+                    self.semantic.parser.debug(id)
+                ),
                 self.semantic.parser.ranges[id],
             )),
         }

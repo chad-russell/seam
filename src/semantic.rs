@@ -51,6 +51,14 @@ impl<'a> Semantic<'a> {
             self.assign_type(*tl, Coercion::None)?
         }
 
+        self.unify_types();
+        if !self.type_matches.is_empty() && !self.type_matches[0].is_empty() {
+            CompileError::from_string(
+                "Failed to unify types",
+                self.parser.ranges[self.type_matches[0][0]],
+            );
+        }
+
         Ok(())
     }
 
@@ -338,6 +346,8 @@ impl<'a> Semantic<'a> {
                 stmts,     //: Vec<Id>,
                 is_specialized,
             } => {
+                self.topo.push(id);
+
                 if !ct_params.is_empty() && !is_specialized {
                     return Ok(());
                 }
@@ -356,15 +366,13 @@ impl<'a> Semantic<'a> {
 
                 for &stmt in stmts.iter() {
                     self.assign_type(stmt, Coercion::None)?;
-                    self.unify_types()?;
+                    // self.unify_types();
                 }
 
                 self.types[id] = Type::Func {
                     return_ty: *return_ty,
                     input_tys: params.clone(),
                 };
-
-                self.topo.push(id);
 
                 Ok(())
             }
@@ -474,18 +482,6 @@ impl<'a> Semantic<'a> {
                     Type::Unassigned => unreachable!(),
                 }
 
-                // if we match against a Type, then set it to whatever we are
-                // todo(chad): this is temporary, need to do the whole array matching thing in the future
-                match coercion {
-                    Coercion::Id(cid) => match self.types[cid].clone() {
-                        Type::Type => {
-                            self.match_types(cid, id);
-                        }
-                        _ => (),
-                    },
-                    _ => (),
-                }
-
                 Ok(())
             }
             Node::Call {
@@ -523,6 +519,7 @@ impl<'a> Semantic<'a> {
                     for (g, d) in given.iter().zip(decl.iter()) {
                         self.assign_type(*d, Coercion::None)?;
                         self.assign_type(*g, Coercion::Id(*d))?;
+                        self.match_types(*g, *d);
                     }
                 }
 
@@ -544,7 +541,8 @@ impl<'a> Semantic<'a> {
 
                 for (g, d) in given.iter().zip(decl.iter()) {
                     self.assign_type(*d, Coercion::None)?;
-                    self.assign_type(*g, Coercion::Id(*d))?;
+                    self.assign_type(*g, Coercion::None)?;
+                    self.match_types(*d, *g);
                 }
 
                 self.assign_type(*name, Coercion::None)?;
@@ -621,19 +619,18 @@ impl<'a> Semantic<'a> {
             (_, _) => (),
         }
 
-        match self.types[ty1].clone() {
-            Type::Type | Type::Unassigned => (),
-            _ => {
-                self.types[ty2] = self.types[ty1].clone();
-                return;
-            }
+        if self.types[ty1].is_concrete() {
+            println!(
+                "copying ({}) to ({})",
+                self.parser.debug(ty1),
+                self.parser.debug(ty2)
+            );
+            self.types[ty2] = self.types[ty1].clone();
+            return;
         }
-        match self.types[ty2].clone() {
-            Type::Type | Type::Unassigned => (),
-            _ => {
-                self.types[ty1] = self.types[ty2].clone();
-                return;
-            }
+        if self.types[ty2].is_concrete() {
+            self.types[ty1] = self.types[ty2].clone();
+            return;
         }
 
         let id1 = self.find_type_array_index(ty1);
@@ -650,29 +647,48 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn unify_types(&mut self) -> Result<(), CompileError> {
+    fn unify_types(&mut self) {
+        let mut to_clear = Vec::new();
+
         for uid in 0..self.type_matches.len() {
+            println!("\n********* Unifying *********");
             let ty = self.type_matches[uid]
                 .iter()
-                .map(|&ty| self.type_specificity(ty))
-                .filter(|&spec| spec > 0)
-                .max();
+                .map(|&ty| {
+                    println!(
+                        "{:?} ({}) : {:?}",
+                        &self.parser.nodes[ty],
+                        self.parser.debug(ty),
+                        &self.types[ty],
+                    );
+                    (ty, self.type_specificity(ty))
+                })
+                .filter(|(_, spec)| *spec > 0)
+                .max_by(|(_, spec1), (_, spec2)| spec1.cmp(spec2))
+                .map(|(ty, _)| ty);
 
             // set all types to whatever we unified to
             if let Some(ty) = ty {
+                match self.types[ty as usize].clone() {
+                    Type::Basic(BasicType::IntLiteral) => {
+                        self.types[ty as usize] = Type::Basic(BasicType::I64);
+                    }
+                    _ => (),
+                }
+                println!("setting all to {:?}", self.parser.debug(ty as _));
+
                 for id in self.type_matches[uid].iter() {
                     self.types[*id] = self.types[ty as usize].clone();
                 }
-            } else {
-                return Err(CompileError::from_string(
-                    "Could not unify types",
-                    self.parser.ranges[self.type_matches[uid][0]],
-                ));
+
+                to_clear.push(uid);
             }
         }
 
-        self.type_matches.clear();
-        Ok(())
+        to_clear.reverse();
+        for uid in to_clear {
+            self.type_matches.remove(uid);
+        }
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {
