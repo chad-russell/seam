@@ -32,17 +32,18 @@ fn poly_id!(P: Type)(x: P) P {
     return y;
 }
 
-fn poly_call!(T: Type)(f: fn(n: T) T, val: T) T {
-    return val;
-}
+// fn poly_call!(T: Type)(f: fn(n: T) T, val: T) T {
+//     return val;
+// }
 
 // struct Poly(T: Type) {
 //     x: T,
 // }
 
 fn main() i64 {
-    // return poly_id(3);
+    return poly_id!(i64)(3);
     // return poly_call(simple, 15);
+    // return poly_call(poly_id, 99);
 
     // return test_fn_ptr();
     // return cpi_test();

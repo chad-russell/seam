@@ -82,7 +82,7 @@ impl Type {
         match self {
             Type::Type | Type::Unassigned | Type::Basic(BasicType::IntLiteral) => false,
             // todo(chad): do we need to keep separate track of funcs that are specialized vs not?
-            Type::Func { .. } => false,
+            // Type::Func { .. } => false,
             _ => true,
         }
     }

@@ -59,6 +59,12 @@ impl<'a> Semantic<'a> {
             );
         }
 
+        for (index, ty) in self.types.iter().enumerate() {
+            if ty == &Type::Unassigned {
+                println!("Unassigned type for {}", self.parser.debug(index));
+            }
+        }
+
         Ok(())
     }
 
@@ -122,32 +128,39 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Let { name: _, ty, expr } => {
-                let coercion = match ty {
-                    Some(ty) => {
-                        self.assign_type(*ty, Coercion::None)?;
-                        Coercion::Id(*ty)
-                    }
-                    None => Coercion::None,
-                };
+                // let coercion = match ty {
+                //     Some(ty) => {
+                //         self.assign_type(*ty, Coercion::None)?;
+                //         Coercion::Id(*ty)
+                //     }
+                //     None => Coercion::None,
+                // };
 
-                if expr.is_some() {
-                    self.assign_type(expr.unwrap(), coercion)?;
+                if let Some(expr) = expr {
+                    self.assign_type(*expr, Coercion::None)?;
+                    self.match_types(id, *expr);
                 }
 
-                match (ty, expr) {
-                    (Some(ty), _) => {
-                        self.match_types(id, *ty);
-                        Ok(())
-                    }
-                    (_, Some(expr)) => {
-                        self.match_types(id, *expr);
-                        Ok(())
-                    }
-                    (None, None) => Err(CompileError::from_string(
-                        "'let' binding with unbound type and no expression",
-                        self.parser.ranges[id],
-                    )),
+                if let Some(ty) = ty {
+                    self.match_types(id, *ty);
                 }
+
+                Ok(())
+
+                // match (ty, expr) {
+                //     (Some(ty), _) => {
+                //         self.match_types(id, *ty);
+                //         Ok(())
+                //     }
+                //     (_, Some(expr)) => {
+                //         self.match_types(id, *expr);
+                //         Ok(())
+                //     }
+                //     (None, None) => Err(CompileError::from_string(
+                //         "'let' binding with unbound type and no expression",
+                //         self.parser.ranges[id],
+                //     )),
+                // }
             }
             Node::Set { name, expr, .. } => {
                 let saved_lhs_assign = self.lhs_assign;
@@ -155,7 +168,10 @@ impl<'a> Semantic<'a> {
                 self.assign_type(*name, Coercion::None)?;
                 self.lhs_assign = saved_lhs_assign;
 
-                self.assign_type(*expr, Coercion::Id(*name))?;
+                self.assign_type(*expr, Coercion::None)?;
+
+                self.match_types(id, *expr);
+                self.match_types(*name, *expr);
 
                 // if name is a load, then we are doing a store
                 let is_load = match &self.parser.nodes[*name] {
@@ -346,8 +362,12 @@ impl<'a> Semantic<'a> {
                 stmts,     //: Vec<Id>,
                 is_specialized,
             } => {
-                if !ct_params.is_empty() && !is_specialized {
-                    return Ok(());
+                // if !ct_params.is_empty() && !is_specialized {
+                //     return Ok(());
+                // }
+
+                for &ct_param in ct_params.iter() {
+                    self.assign_type(ct_param, Coercion::None)?;
                 }
 
                 self.assign_type(*return_ty, Coercion::None)?;
@@ -364,7 +384,6 @@ impl<'a> Semantic<'a> {
 
                 for &stmt in stmts.iter() {
                     self.assign_type(stmt, Coercion::None)?;
-                    // self.unify_types();
                 }
 
                 self.types[id] = Type::Func {
@@ -607,31 +626,46 @@ impl<'a> Semantic<'a> {
     }
 
     fn match_types(&mut self, ty1: Id, ty2: Id) {
+        if self.types[ty2].is_concrete() && !self.types[ty1].is_concrete() {
+            self.types[ty1] = self.types[ty2].clone();
+        }
+        if self.types[ty1].is_concrete() && !self.types[ty2].is_concrete() {
+            self.types[ty2] = self.types[ty1].clone();
+        }
+
         match (self.types[ty1].clone(), self.types[ty2].clone()) {
-            (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => {
-                // todo(chad): check whether it's actually assgnable (float, bool, overflow, etc.)
-                self.types[ty1] = Type::Basic(bt);
+            (
+                Type::Func {
+                    return_ty: return_ty1,
+                    input_tys: input_tys1,
+                },
+                Type::Func {
+                    return_ty: return_ty2,
+                    input_tys: input_tys2,
+                },
+            ) => {
+                self.match_types(return_ty1, return_ty2);
+                for (it1, it2) in input_tys1.iter().zip(input_tys2.iter()) {
+                    self.match_types(*it1, *it2);
+                }
             }
-            (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => {
-                // todo(chad): check whether it's actually assgnable (float, bool, overflow, etc.)
-                self.types[ty2] = Type::Basic(bt);
+            (Type::Struct(_), Type::Struct(_)) => {
+                todo!("Implement recursive type-matching for structs")
             }
             (_, _) => (),
         }
 
-        if self.types[ty1].is_concrete() {
-            println!(
-                "copying ({}) to ({})",
-                self.parser.debug(ty1),
-                self.parser.debug(ty2)
-            );
-            self.types[ty2] = self.types[ty1].clone();
-            return;
-        }
-        if self.types[ty2].is_concrete() {
-            self.types[ty1] = self.types[ty2].clone();
-            return;
-        }
+        // if ty1 == 24 && ty2 == 36 {
+        // println!(
+        //     "matching {} ({}) : {:?} with {} ({}) {:?}",
+        //     ty1,
+        //     self.parser.debug(ty1),
+        //     &self.types[ty1],
+        //     ty2,
+        //     self.parser.debug(ty2),
+        //     &self.types[ty2],
+        // );
+        // }
 
         let id1 = self.find_type_array_index(ty1);
         let id2 = self.find_type_array_index(ty2);
@@ -651,19 +685,20 @@ impl<'a> Semantic<'a> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
-            println!("\n********* Unifying *********");
+            // println!("\n********* Unifying *********");
             let ty = self.type_matches[uid]
                 .iter()
                 .map(|&ty| {
-                    println!(
-                        "{:?} ({}) : {:?}",
-                        &self.parser.nodes[ty],
-                        self.parser.debug(ty),
-                        &self.types[ty],
-                    );
+                    // println!(
+                    //     "{:?} ({}) : {:?}",
+                    //     &self.parser.nodes[ty],
+                    //     self.parser.debug(ty),
+                    //     &self.types[ty],
+                    // );
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
+                .filter(|(ty, _)| self.types[*ty as usize].is_concrete())
                 .max_by(|(_, spec1), (_, spec2)| spec1.cmp(spec2))
                 .map(|(ty, _)| ty);
 
@@ -675,11 +710,11 @@ impl<'a> Semantic<'a> {
                     }
                     _ => (),
                 }
-                println!(
-                    "setting all to {:?} (from {:?})",
-                    self.types[ty as usize],
-                    self.parser.debug(ty as _)
-                );
+                // println!(
+                //     "setting all to {:?} (from {:?})",
+                //     self.types[ty as usize],
+                //     self.parser.debug(ty as _)
+                // );
 
                 for id in self.type_matches[uid].iter() {
                     self.types[*id] = self.types[ty as usize].clone();
