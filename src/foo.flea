@@ -1,58 +1,44 @@
-struct Point {
-    x: i64,
-    y: i64,
-}
-
-struct Line {
-    start: *Point,
-    end: *Point,
-}
-
-struct Foo {
-    value: i64,
-    bar: *Bar,
-}
-
-struct Bar {
-    value: i64,
-    baz: *Baz,
-}
-
-struct Baz {
-    value: i64,
-    qux: *Qux,
-}
-
-struct Qux {
-    value: **i64,
-}
-
-// fn id!(n: i64)(a: i64) i64 {
-//     return n;
+// struct Point {
+//     x: i64,
+//     y: i64,
 // }
 
-fn get_x(p: *Point) i64 {
-    let hack_p = p;
-    return hack_p.x;
-}
+// struct Line {
+//     start: *Point,
+//     end: *Point,
+// }
 
-fn get_y(p: *Point) i64 {
-    let hack_p = p;
-    return hack_p.y;
-}
+// struct Foo {
+//     value: i64,
+//     bar: *Bar,
+// }
 
-fn poly_get_y!(T: Type)(p: *T) i64 {
-    let hack_p = p;
-    return p.y;
+// struct Bar {
+//     value: i64,
+//     baz: *Baz,
+// }
+
+// struct Baz {
+//     value: i64,
+//     qux: *Qux,
+// }
+
+// struct Qux {
+//     value: **i64,
+// }
+
+struct Poly!(T: Type) {
+    value: T,
 }
 
 fn main() i64 {
+    let p: Poly!(i64) = { value: 13 };
+    return p.value;
+
     // return poly_call(id, 15);
     // return poly_call(poly_id, 99);
     // return poly_omg(poly_call, poly_id, 10);
-
-    let p: Point = {x: 3, y: 4};
-    return poly_get_y(&p);
+    // return test_poly1();
 
     // return omg(call, id, 10);
     // return call(id, 10);
@@ -62,13 +48,32 @@ fn main() i64 {
     // return baz();
     // return bar();
     // return test_load_param();
-
-    // return cpi_test();
 }
 
-fn id(n: i64) i64 {
-    return n;
-}
+// fn test_poly1() i64 {
+//     let p: Point = {x: 3, y: 4};
+//     return poly_get_y(&p);
+//     // return get_y(&p);
+// }
+
+// fn get_x(p: *Point) i64 {
+//     let hack_p = p;
+//     return hack_p.x;
+// }
+
+// fn get_y(p: *Point) i64 {
+//     let hack_p = p;
+//     return hack_p.y;
+// }
+
+// fn poly_get_y!(T: Type)(p: *T) i64 {
+//     let hack_p = p;
+//     return hack_p.y;
+// }
+
+// fn id(n: i64) i64 {
+//     return n;
+// }
 
 // fn poly_id!(P: Type)(x: P) P {
 //     return x;
@@ -96,79 +101,79 @@ fn id(n: i64) i64 {
 //     return g(f, val);
 // }
 
-fn test_fn_ptr() i64 {
-    let f: fn() i64 = ---;
-    f = id;
-    return f();
-}
+// fn test_fn_ptr() i64 {
+//     let f: fn() i64 = ---;
+//     f = id;
+//     return f();
+// }
 
-fn cpi_test() i64 {
-    let foo: Foo = ---;
-    let bar: Bar = ---;
-    let baz: Baz = ---;
-    let qux: Qux = ---;
+// fn cpi_test() i64 {
+//     let foo: Foo = ---;
+//     let bar: Bar = ---;
+//     let baz: Baz = ---;
+//     let qux: Qux = ---;
 
-    foo.value = 111;
-    bar.value = 222;
-    baz.value = 333;
-    qux.value = &&444;
+//     foo.value = 111;
+//     bar.value = 222;
+//     baz.value = 333;
+//     qux.value = &&444;
 
-    baz.qux = &qux;
-    bar.baz = &baz;
-    foo.bar = &bar;
+//     baz.qux = &qux;
+//     bar.baz = &baz;
+//     foo.bar = &bar;
 
-    ^bar.baz.qux.value = &7;
+//     ^bar.baz.qux.value = &7;
 
-    // assert(3 == ^^foo.bar.baz.qux.value);
-    // assert(3 == ^^bar.baz.qux.value);
-    // assert(3 == ^^baz.qux.value);
-    // assert(3 == ^^qux.value);
+//     // assert(3 == ^^foo.bar.baz.qux.value);
+//     // assert(3 == ^^bar.baz.qux.value);
+//     // assert(3 == ^^baz.qux.value);
+//     // assert(3 == ^^qux.value);
 
-    return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
-}
+//     return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
+// }
     
-fn test_load_param() i64 {
-    return load_wrapper(&&10);
-}
+// fn test_load_param() i64 {
+//     return load_wrapper(&&10);
+// }
 
-fn load_wrapper(n: **i64) i64 {
-    let nn: **i64 = n;
-    return ^^nn;
-}
+// fn load_wrapper(n: **i64) i64 {
+//     let nn: **i64 = n;
+//     return ^^nn;
+// }
 
-fn bar() i64 {
-    let p: Point = ---;
+// fn bar() i64 {
+//     let p: Point = ---;
 
-    let l2: Line = ---;
-    l2.start = &p;
+//     let l2: Line = ---;
+//     l2.start = &p;
 
-    let l = &l2;
+//     let l = &l2;
 
-    let ppp = &l.start;
-    let pp = ^ppp;
-    pp.y = 123;
+//     let ppp = &l.start;
+//     let pp = ^ppp;
+//     pp.y = 123;
 
-    // let ppp2 = &l.start;
-    // (^ppp2).y = 120;
+//     // let ppp2 = &l.start;
+//     // (^ppp2).y = 120;
 
-    // let ps: *Point = l.start;
-    // ps.y = 300;
+//     // let ps: *Point = l.start;
+//     // ps.y = 300;
 
-    // l.start.y = 123;
+//     // l.start.y = 123;
 
-    return p.y;
-}
+//     return p.y;
+// }
 
-fn baz() i64 {
-    let p: Point = ---;
-    let pp = &p;
-    let ppp = &pp;
+// fn baz() i64 {
+//     let p: Point = ---;
+//     let pp = &p;
+//     let ppp = &pp;
 
-    let p2: Point = ---;
-    p2.x = 3;
-    p2.y = 8;
-    let pp2 = &p2;
+//     let p2: Point = ---;
+//     p2.x = 3;
+//     p2.y = 8;
+//     let pp2 = &p2;
 
-    ^^ppp = ^pp2;
-    return p.y;
-}
+//     ^^ppp = ^pp2;
+//     return p.y;
+// }

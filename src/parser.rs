@@ -578,7 +578,6 @@ pub enum Node {
         params: Vec<Id>,
         return_ty: Id,
         stmts: Vec<Id>,
-        is_specialized: bool,
     },
     DeclParam {
         name: Sym,
@@ -587,6 +586,7 @@ pub enum Node {
     },
     Struct {
         name: Sym,
+        ct_params: Vec<Id>,
         params: Vec<Id>,
     },
     Enum {
@@ -1045,7 +1045,7 @@ impl<'a> Parser<'a> {
                         || self.lexer.top.tok == Token::LParen
                     {
                         let ct_params = if self.lexer.top.tok == Token::Bang {
-                            self.expect(&Token::Bang)?;
+                            self.lexer.pop();
                             self.expect(&Token::LParen)?;
                             let params = self.parse_value_params()?;
                             self.expect(&Token::RParen)?;
@@ -1314,8 +1314,7 @@ impl<'a> Parser<'a> {
         self.top_scope = self.scopes.len() - 1;
 
         let ct_params = if self.lexer.top.tok == Token::Bang {
-            self.lexer.top.range.start;
-            self.expect(&Token::Bang)?;
+            self.lexer.pop();
             self.expect(&Token::LParen)?;
             let ct_params = self.parse_params()?;
             self.expect(&Token::RParen)?;
@@ -1349,7 +1348,6 @@ impl<'a> Parser<'a> {
                 params,
                 return_ty,
                 stmts,
-                is_specialized: false,
             },
         );
 
@@ -1371,11 +1369,28 @@ impl<'a> Parser<'a> {
                 self.lexer.pop();
                 let name = self.parse_sym()?;
 
+                let ct_params = if self.lexer.top.tok == Token::Bang {
+                    self.lexer.pop();
+                    self.expect(&Token::LParen)?;
+                    let params = self.parse_params()?;
+                    self.expect(&Token::RParen)?;
+                    params
+                } else {
+                    Vec::new()
+                };
+
                 self.expect(&Token::LCurly)?;
                 let params = self.parse_params()?;
                 let range = self.expect_range(start, Token::RCurly)?;
 
-                let id = self.push_node(range, Node::Struct { name, params });
+                let id = self.push_node(
+                    range,
+                    Node::Struct {
+                        name,
+                        ct_params,
+                        params,
+                    },
+                );
                 self.scope_insert(name, id);
 
                 Ok(id)
@@ -1410,148 +1425,4 @@ impl<'a> Parser<'a> {
 
         self.lexer.original_source[range.start.char_offset..range.end.char_offset].to_string()
     }
-
-    // pub fn debug(&self, id: Id) -> String {
-    //     match &self.nodes[id] {
-    //         Node::Symbol(sym) => self.debug_sym(*sym),
-    //         Node::IntLiteral(i) => format!("{}", i),
-    //         Node::FloatLiteral(f) => format!("{}", f),
-    //         Node::BoolLiteral(b) => format!("{}", b),
-    //         Node::StringLiteral(s) => format!("\"{}\"", s),
-    //         Node::TypeLiteral(ty) => match ty {
-    //             Type::Pointer(p) => format!("(ptr {})", self.debug(*p)),
-    //             _ => format!("{:?}", ty),
-    //         },
-    //         Node::Return(id) => format!("(return {})", self.debug(*id)),
-    //         Node::Let { name, ty, expr } => format!(
-    //             "(let {} {} {})",
-    //             self.debug_sym(*name),
-    //             ty.map(|ty| self.debug(ty)).unwrap_or("_".to_string()),
-    //             if expr.is_some() {
-    //                 self.debug(expr.unwrap())
-    //             } else {
-    //                 String::from("uninit")
-    //             }
-    //         ),
-    //         Node::Set { name, expr, .. } => {
-    //             format!("(set {} {})", self.debug_sym(*name), self.debug(*expr))
-    //         }
-    //         Node::Ref(id) => format!("(ref {})", self.debug(*id)),
-    //         Node::Field {
-    //             base, field_name, ..
-    //         } => format!(
-    //             "(field {} {})",
-    //             self.debug(*base),
-    //             self.debug_sym(*field_name)
-    //         ),
-    //         Node::Load(id) => format!("(load {})", self.debug(*id)),
-    //         Node::PtrCast { ty, expr } => {
-    //             format!("(ptrcast {} {})", self.debug(*ty), self.debug(*expr))
-    //         }
-    //         Node::ValueParam { name, value, .. } => format!(
-    //             "({} {})",
-    //             name.map(|n| self.debug(n)).unwrap_or("".to_string()),
-    //             self.debug(*value),
-    //         ),
-    //         Node::StructLiteral { name, params } => format!(
-    //             "(struct-literal {} {})",
-    //             name.map(|n| self.debug(n)).unwrap_or("_".to_string()),
-    //             params
-    //                 .iter()
-    //                 .map(|p| self.debug(*p))
-    //                 .collect::<Vec<_>>()
-    //                 .join(", ")
-    //         ),
-    //         Node::Func {
-    //             name,
-    //             scope: _,
-    //             ct_params: _,
-    //             params,
-    //             return_ty,
-    //             stmts,
-    //             is_specialized: _,
-    //         } => {
-    //             let mut d = format!(
-    //                 "(fn {} ({}) {} ",
-    //                 self.debug_sym(*name),
-    //                 params
-    //                     .iter()
-    //                     .map(|p| self.debug(*p))
-    //                     .collect::<Vec<_>>()
-    //                     .join(","),
-    //                 self.debug(*return_ty)
-    //             );
-    //             for bb in stmts {
-    //                 d += "\n  ";
-    //                 d += &self.debug(*bb)
-    //             }
-    //             d += ")";
-    //             d
-    //         }
-    //         Node::Struct { name, params } => format!(
-    //             "(struct {} ({}))",
-    //             self.debug_sym(*name),
-    //             params
-    //                 .iter()
-    //                 .map(|p| self.debug(*p))
-    //                 .collect::<Vec<_>>()
-    //                 .join(",")
-    //         ),
-    //         Node::Enum { name, params } => format!(
-    //             "(enum {} ({}))",
-    //             self.debug_sym(*name),
-    //             params
-    //                 .iter()
-    //                 .map(|p| self.debug(*p))
-    //                 .collect::<Vec<_>>()
-    //                 .join(",")
-    //         ),
-    //         Node::DeclParam { name, ty, index: _ } => {
-    //             format!("({} {})", self.debug_sym(*name), self.debug(*ty))
-    //         }
-    //         Node::Call {
-    //             name,
-    //             ct_params: _,
-    //             params,
-    //             is_indirect,
-    //         } => format!(
-    //             "({} {} {})",
-    //             if *is_indirect { "calli" } else { "call" },
-    //             self.debug(*name),
-    //             params
-    //                 .iter()
-    //                 .map(|a| self.debug(*a))
-    //                 .collect::<Vec<_>>()
-    //                 .join(", ")
-    //         ),
-    //         Node::Add(arg1, arg2) => format!("(+ {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::Sub(arg1, arg2) => format!("(- {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::Mul(arg1, arg2) => format!("(* {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::Div(arg1, arg2) => format!("(/ {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::LessThan(arg1, arg2) => {
-    //             format!("(< {} {})", self.debug(*arg1), self.debug(*arg2))
-    //         }
-    //         Node::GreaterThan(arg1, arg2) => {
-    //             format!("(> {} {})", self.debug(*arg1), self.debug(*arg2))
-    //         }
-    //         Node::EqualTo(arg1, arg2) => format!("(= {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::And(arg1, arg2) => format!("(and {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::Or(arg1, arg2) => format!("(or {} {})", self.debug(*arg1), self.debug(*arg2)),
-    //         Node::Not(arg1) => format!("(not {})", self.debug(*arg1)),
-    //         Node::If(c, i, e) => format!(
-    //             "(if {} {} {})",
-    //             self.debug(*c),
-    //             self.debug(*i),
-    //             e.map(|m| self.debug(m)).unwrap_or_default()
-    //         ),
-    //         Node::While(c, e) => format!(
-    //             "(while {} {})",
-    //             self.debug(*c),
-    //             e.iter()
-    //                 .map(|s| self.debug(*s))
-    //                 .collect::<Vec<_>>()
-    //                 .join("\n")
-    //         ),
-    //     }
-    // }
 }

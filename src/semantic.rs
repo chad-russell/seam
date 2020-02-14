@@ -48,7 +48,14 @@ impl<'a> Semantic<'a> {
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
         // todo(chad): clone *sigh*
         for tl in self.parser.top_level.clone().iter() {
-            self.assign_type(*tl, Coercion::None)?
+            let is_poly = match &self.parser.nodes[*tl] {
+                Node::Func { ct_params, .. } => !ct_params.is_empty(),
+                _ => false,
+            };
+
+            if !is_poly {
+                self.assign_type(*tl, Coercion::None)?
+            }
         }
 
         self.unify_types();
@@ -194,15 +201,26 @@ impl<'a> Semantic<'a> {
                     .as_struct_params()
                     .ok_or(CompileError::from_string(
                         format!(
-                            "Expected struct or enum, got {:?}",
-                            self.parser.debug(unpointered_ty)
+                            "Expected struct or enum, got {:?} for node {}",
+                            self.parser.debug(unpointered_ty),
+                            unpointered_ty,
                         ),
                         self.parser.ranges[*base],
                     ))?
                     .iter()
                     .enumerate()
                     .map(|(_index, id)| {
-                        let (name, ty, index) = self.parser.nodes[*id].as_param().unwrap();
+                        let (name, ty, index) = match &self.parser.nodes[*id] {
+                            Node::DeclParam { name, ty, index } => Some((*name, *ty, *index)),
+                            Node::ValueParam {
+                                name,
+                                value: _,
+                                index,
+                            } => Some((name.unwrap(), *id, *index)),
+                            _ => None,
+                        }
+                        .unwrap();
+
                         (name, (ty, index))
                     })
                     .collect::<BTreeMap<_, _>>();
@@ -338,12 +356,7 @@ impl<'a> Semantic<'a> {
                 params,    //: Vec<Id>,
                 return_ty, //: Id,
                 stmts,     //: Vec<Id>,
-                is_specialized,
             } => {
-                // if !ct_params.is_empty() && !is_specialized {
-                //     return Ok(());
-                // }
-
                 for &ct_param in ct_params.iter() {
                     self.assign_type(ct_param, Coercion::None)?;
                 }
@@ -519,13 +532,6 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
-                match self.parser.nodes.get_mut(resolved_func).unwrap() {
-                    Node::Func { is_specialized, .. } => {
-                        *is_specialized = true;
-                    }
-                    _ => (),
-                }
-
                 let given = params;
                 let decl = match &self.parser.nodes[resolved_func] {
                     Node::Func { params, .. } => params.clone(),
@@ -550,7 +556,7 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Struct { name: _, params } => {
+            Node::Struct { params, .. } => {
                 for param in params {
                     self.assign_type(*param, Coercion::None)?;
                 }
@@ -631,6 +637,9 @@ impl<'a> Semantic<'a> {
                     self.match_types(*ty1, *ty2);
                 }
             }
+            (Type::Pointer(pt1), Type::Pointer(pt2)) => {
+                self.match_types(pt1, pt2);
+            }
             (_, _) => (),
         }
 
@@ -670,7 +679,8 @@ impl<'a> Semantic<'a> {
                 .map(|&ty| {
                     // println!(
                     //     "{:?} ({}) : {:?}",
-                    //     &self.parser.nodes[ty],
+                    //     // &self.parser.nodes[ty],
+                    //     ty,
                     //     self.parser.debug(ty),
                     //     &self.types[ty],
                     // );
