@@ -13,8 +13,16 @@ use parser::CompileError;
 
 fn main() -> Result<(), CompileError> {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
-    let mut backend = Backend::bootstrap_from_source(&source)?;
+
+    let backend = Backend::bootstrap_from_source(&source)?;
+
+    let now = std::time::Instant::now();
     dbg!(backend.call_func("main"));
+    let elapsed = now.elapsed();
+    println!(
+        "Function 'main' ran in {}",
+        elapsed.as_micros() as f64 / 1_000_000.0
+    );
 
     //     backend.update_source(
     //         "

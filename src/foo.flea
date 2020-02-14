@@ -27,38 +27,78 @@ struct Qux {
     value: **i64,
 }
 
-fn poly_id!(P: Type)(x: P) P {
-    let y = x;
-    return y;
+// fn id!(n: i64)(a: i64) i64 {
+//     return n;
+// }
+
+fn get_x(p: *Point) i64 {
+    let hack_p = p;
+    return hack_p.x;
 }
 
-// fn poly_call!(T: Type)(f: fn(n: T) T, val: T) T {
-//     return val;
-// }
+fn get_y(p: *Point) i64 {
+    let hack_p = p;
+    return hack_p.y;
+}
 
-// struct Poly(T: Type) {
-//     x: T,
-// }
+fn poly_get_y!(T: Type)(p: *T) i64 {
+    let hack_p = p;
+    return p.y;
+}
 
 fn main() i64 {
-    return poly_id(3);
-    // return poly_call(simple, 15);
+    // return poly_call(id, 15);
     // return poly_call(poly_id, 99);
+    // return poly_omg(poly_call, poly_id, 10);
+
+    let p: Point = {x: 3, y: 4};
+    return poly_get_y(&p);
+
+    // return omg(call, id, 10);
+    // return call(id, 10);
 
     // return test_fn_ptr();
     // return cpi_test();
     // return baz();
     // return bar();
     // return test_load_param();
+
+    // return cpi_test();
 }
 
-fn simple(n: i64) i64 {
+fn id(n: i64) i64 {
     return n;
 }
 
+// fn poly_id!(P: Type)(x: P) P {
+//     return x;
+// }
+
+// fn call(f: fn(n: i64) i64, val: i64) i64 {
+//     return f(val);
+// }
+
+// fn poly_call!(T: Type, R: Type)(f: fn(n: T) R, val: T) R {
+//     return f(val);
+// }
+
+// fn omg(g: fn(f1: fn(n1: i64) i64, val1: i64) i64, 
+//        f: fn(n: i64) i64, 
+//        val: i64) i64 {
+//     return g(f, val);
+// }
+
+// fn poly_omg!(P: Type)(
+//     g: fn(f1: fn(n1: P) P, val1: P) P, 
+//     f: fn(n: P) P, 
+//     val: P
+// ) P {
+//     return g(f, val);
+// }
+
 fn test_fn_ptr() i64 {
     let f: fn() i64 = ---;
-    f = simple;
+    f = id;
     return f();
 }
 

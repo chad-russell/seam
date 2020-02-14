@@ -1,0 +1,419 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="454" onload="init(evt)" viewBox="0 0 1200 454" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[var nametype = 'Function:';
+var fontsize = 12;
+var fontwidth = 0.59;
+var xpad = 10;
+var inverted = false;
+var searchcolor = 'rgb(230,0,230)';
+var fluiddrawing = true;
+var truncate_text_right = false;]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+            var params = get_params()
+            params.x = el.attributes._orig_x.value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["_orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("_orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["_orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+    e.removeAttribute("_orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.attributes != undefined) {
+        orig_load(e, "x");
+        orig_load(e, "width");
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, ratio) {
+    if (e.attributes != undefined) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = format_percent((parseFloat(e.attributes.x.value) - x) * ratio);
+            if (e.tagName == "text") {
+                e.attributes.x.value = format_percent(parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value) + (100 * 3 / frames.attributes.width.value));
+            }
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = format_percent(parseFloat(e.attributes.width.value) * ratio);
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, ratio);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            orig_save(e, "x");
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            orig_save(e, "width");
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseFloat(attr.width.value);
+    var xmin = parseFloat(attr.x.value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    var ratio = 100 / width;
+    // XXX: Workaround for JavaScript float issues (fix me)
+    var fudge = 0.001;
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseFloat(a.x.value);
+        var ew = parseFloat(a.width.value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex + fudge >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, ratio);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseFloat(rect.attributes.width.value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseFloat(rect.attributes.x.value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    var fudge = 0.0001;    // JavaScript floating point
+    for (var k in keys) {
+        var x = parseFloat(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw - fudge) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="454" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="437.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="437.00"> </text><svg id="frames" x="10" width="1180"><g><title>flea`core::ptr::real_drop_in_place (1 samples, 0.11%)</title><rect x="0.0000%" y="261" width="0.1057%" height="15" fill="rgb(227,0,7)"/><text x="0.2500%" y="271.50"></text></g><g><title>libsystem_kernel.dylib`madvise (1 samples, 0.11%)</title><rect x="0.0000%" y="245" width="0.1057%" height="15" fill="rgb(217,0,24)"/><text x="0.2500%" y="255.50"></text></g><g><title>flea`core::ptr::real_drop_in_place (1 samples, 0.11%)</title><rect x="0.3171%" y="245" width="0.1057%" height="15" fill="rgb(221,193,54)"/><text x="0.5671%" y="255.50"></text></g><g><title>flea`&lt;hashbrown::raw::RawTable&lt;T&gt; as core::ops::drop::Drop&gt;::drop (1 samples, 0.11%)</title><rect x="0.3171%" y="229" width="0.1057%" height="15" fill="rgb(248,212,6)"/><text x="0.5671%" y="239.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="0.3171%" y="213" width="0.1057%" height="15" fill="rgb(208,68,35)"/><text x="0.5671%" y="223.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1 samples, 0.11%)</title><rect x="0.3171%" y="197" width="0.1057%" height="15" fill="rgb(232,128,0)"/><text x="0.5671%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (1 samples, 0.11%)</title><rect x="0.3171%" y="181" width="0.1057%" height="15" fill="rgb(207,160,47)"/><text x="0.5671%" y="191.50"></text></g><g><title>flea`cranelift_codegen::context::Context::clear (1 samples, 0.11%)</title><rect x="0.4228%" y="245" width="0.1057%" height="15" fill="rgb(228,23,34)"/><text x="0.6728%" y="255.50"></text></g><g><title>flea`cranelift_codegen::ir::function::Function::clear (1 samples, 0.11%)</title><rect x="0.4228%" y="229" width="0.1057%" height="15" fill="rgb(218,30,26)"/><text x="0.6728%" y="239.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::clear (1 samples, 0.11%)</title><rect x="0.4228%" y="213" width="0.1057%" height="15" fill="rgb(220,122,19)"/><text x="0.6728%" y="223.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="0.4228%" y="197" width="0.1057%" height="15" fill="rgb(250,228,42)"/><text x="0.6728%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1 samples, 0.11%)</title><rect x="0.4228%" y="181" width="0.1057%" height="15" fill="rgb(240,193,28)"/><text x="0.6728%" y="191.50"></text></g><g><title>flea`&lt;cranelift_simplejit::backend::SimpleJITBackend as cranelift_module::backend::Backend&gt;::define_function (4 samples, 0.42%)</title><rect x="0.5285%" y="229" width="0.4228%" height="15" fill="rgb(216,20,37)"/><text x="0.7785%" y="239.50"></text></g><g><title>flea`cranelift_codegen::context::Context::emit_to_memory (4 samples, 0.42%)</title><rect x="0.5285%" y="213" width="0.4228%" height="15" fill="rgb(206,188,39)"/><text x="0.7785%" y="223.50"></text></g><g><title>flea`cranelift_codegen::binemit::emit_function (4 samples, 0.42%)</title><rect x="0.5285%" y="197" width="0.4228%" height="15" fill="rgb(217,207,13)"/><text x="0.7785%" y="207.50"></text></g><g><title>flea`cranelift_codegen::isa::x86::binemit::emit_inst (2 samples, 0.21%)</title><rect x="0.7400%" y="181" width="0.2114%" height="15" fill="rgb(231,73,38)"/><text x="0.9900%" y="191.50"></text></g><g><title>flea`cranelift_codegen::legalizer::boundary::legalize_signatures (3 samples, 0.32%)</title><rect x="0.9514%" y="181" width="0.3171%" height="15" fill="rgb(225,20,46)"/><text x="1.2014%" y="191.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::x86::Isa as cranelift_codegen::isa::TargetIsa&gt;::legalize_signature (3 samples, 0.32%)</title><rect x="0.9514%" y="165" width="0.3171%" height="15" fill="rgb(210,31,41)"/><text x="1.2014%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (2 samples, 0.21%)</title><rect x="1.0571%" y="149" width="0.2114%" height="15" fill="rgb(221,200,47)"/><text x="1.3071%" y="159.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::enc_tables::Encodings as core::iter::traits::iterator::Iterator&gt;::next (1 samples, 0.11%)</title><rect x="1.4799%" y="133" width="0.1057%" height="15" fill="rgb(226,26,5)"/><text x="1.7299%" y="143.50"></text></g><g><title>flea`cranelift_codegen::ir::function::Function::update_encoding (3 samples, 0.32%)</title><rect x="1.3742%" y="165" width="0.3171%" height="15" fill="rgb(249,33,26)"/><text x="1.6242%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::TargetIsa::encode (2 samples, 0.21%)</title><rect x="1.4799%" y="149" width="0.2114%" height="15" fill="rgb(235,183,28)"/><text x="1.7299%" y="159.50"></text></g><g><title>flea`cranelift_codegen::isa::x86::enc_tables::inst_predicate_30 (1 samples, 0.11%)</title><rect x="1.5856%" y="133" width="0.1057%" height="15" fill="rgb(221,5,38)"/><text x="1.8356%" y="143.50"></text></g><g><title>flea`cranelift_codegen::ir::builder::InstBuilder::func_addr (1 samples, 0.11%)</title><rect x="1.6913%" y="117" width="0.1057%" height="15" fill="rgb(247,18,42)"/><text x="1.9413%" y="127.50"></text></g><g><title>flea`&lt;&amp;mut cranelift_codegen::cursor::FuncCursor as cranelift_codegen::ir::builder::InstInserterBase&gt;::insert_built_inst (1 samples, 0.11%)</title><rect x="1.6913%" y="101" width="0.1057%" height="15" fill="rgb(241,131,45)"/><text x="1.9413%" y="111.50"></text></g><g><title>flea`cranelift_codegen::ir::layout::Layout::insert_inst (1 samples, 0.11%)</title><rect x="1.6913%" y="85" width="0.1057%" height="15" fill="rgb(249,31,29)"/><text x="1.9413%" y="95.50"></text></g><g><title>flea`alloc::vec::Vec&lt;T&gt;::resize (1 samples, 0.11%)</title><rect x="1.6913%" y="69" width="0.1057%" height="15" fill="rgb(225,111,53)"/><text x="1.9413%" y="79.50"></text></g><g><title>flea`cranelift_codegen::legalizer::legalize_function (9 samples, 0.95%)</title><rect x="0.9514%" y="197" width="0.9514%" height="15" fill="rgb(238,160,17)"/><text x="1.2014%" y="207.50"></text></g><g><title>flea`cranelift_codegen::legalizer::legalize_inst (6 samples, 0.63%)</title><rect x="1.2685%" y="181" width="0.6342%" height="15" fill="rgb(214,148,48)"/><text x="1.5185%" y="191.50"></text></g><g><title>flea`cranelift_codegen::legalizer::expand_flags (2 samples, 0.21%)</title><rect x="1.6913%" y="165" width="0.2114%" height="15" fill="rgb(232,36,49)"/><text x="1.9413%" y="175.50"></text></g><g><title>flea`cranelift_codegen::legalizer::expand (2 samples, 0.21%)</title><rect x="1.6913%" y="149" width="0.2114%" height="15" fill="rgb(209,103,24)"/><text x="1.9413%" y="159.50"></text></g><g><title>flea`cranelift_codegen::legalizer::call::expand_call (2 samples, 0.21%)</title><rect x="1.6913%" y="133" width="0.2114%" height="15" fill="rgb(229,88,8)"/><text x="1.9413%" y="143.50"></text></g><g><title>flea`cranelift_entity::list::EntityList&lt;T&gt;::push (1 samples, 0.11%)</title><rect x="1.7970%" y="117" width="0.1057%" height="15" fill="rgb(213,181,19)"/><text x="2.0470%" y="127.50"></text></g><g><title>flea`alloc::vec::Vec&lt;T&gt;::resize (1 samples, 0.11%)</title><rect x="1.7970%" y="101" width="0.1057%" height="15" fill="rgb(254,191,54)"/><text x="2.0470%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`realloc (1 samples, 0.11%)</title><rect x="1.7970%" y="85" width="0.1057%" height="15" fill="rgb(241,83,37)"/><text x="2.0470%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (1 samples, 0.11%)</title><rect x="1.7970%" y="69" width="0.1057%" height="15" fill="rgb(233,36,39)"/><text x="2.0470%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (1 samples, 0.11%)</title><rect x="1.7970%" y="53" width="0.1057%" height="15" fill="rgb(226,3,54)"/><text x="2.0470%" y="63.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="1.7970%" y="37" width="0.1057%" height="15" fill="rgb(245,192,40)"/><text x="2.0470%" y="47.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute (1 samples, 0.11%)</title><rect x="1.9027%" y="181" width="0.1057%" height="15" fill="rgb(238,167,29)"/><text x="2.1527%" y="191.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute_ebb (1 samples, 0.11%)</title><rect x="1.9027%" y="165" width="0.1057%" height="15" fill="rgb(232,182,51)"/><text x="2.1527%" y="175.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::x86::Isa as cranelift_codegen::isa::TargetIsa&gt;::legal_encodings (1 samples, 0.11%)</title><rect x="2.4313%" y="165" width="0.1057%" height="15" fill="rgb(231,60,39)"/><text x="2.6813%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="2.5370%" y="165" width="0.1057%" height="15" fill="rgb(208,69,12)"/><text x="2.7870%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::typecheck (2 samples, 0.21%)</title><rect x="2.6427%" y="165" width="0.2114%" height="15" fill="rgb(235,93,37)"/><text x="2.8927%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::check_outgoing_args (2 samples, 0.21%)</title><rect x="2.6427%" y="149" width="0.2114%" height="15" fill="rgb(213,116,39)"/><text x="2.8927%" y="159.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::verify_value (1 samples, 0.11%)</title><rect x="2.8541%" y="165" width="0.1057%" height="15" fill="rgb(222,207,29)"/><text x="3.1041%" y="175.50"></text></g><g><title>flea`cranelift_codegen::context::Context::legalize (20 samples, 2.11%)</title><rect x="0.9514%" y="213" width="2.1142%" height="15" fill="rgb(206,96,30)"/><text x="1.2014%" y="223.50">f..</text></g><g><title>flea`cranelift_codegen::verifier::verify_context (11 samples, 1.16%)</title><rect x="1.9027%" y="197" width="1.1628%" height="15" fill="rgb(218,138,4)"/><text x="2.1527%" y="207.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::run (10 samples, 1.06%)</title><rect x="2.0085%" y="181" width="1.0571%" height="15" fill="rgb(250,191,14)"/><text x="2.2585%" y="191.50"></text></g><g><title>flea`cranelift_codegen::verifier::flags::verify_flags (1 samples, 0.11%)</title><rect x="2.9598%" y="165" width="0.1057%" height="15" fill="rgb(239,60,40)"/><text x="3.2098%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`malloc (1 samples, 0.11%)</title><rect x="2.9598%" y="149" width="0.1057%" height="15" fill="rgb(206,27,48)"/><text x="3.2098%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (1 samples, 0.11%)</title><rect x="2.9598%" y="133" width="0.1057%" height="15" fill="rgb(225,35,8)"/><text x="3.2098%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (1 samples, 0.11%)</title><rect x="2.9598%" y="117" width="0.1057%" height="15" fill="rgb(250,213,24)"/><text x="3.2098%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (1 samples, 0.11%)</title><rect x="2.9598%" y="101" width="0.1057%" height="15" fill="rgb(247,123,22)"/><text x="3.2098%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (1 samples, 0.11%)</title><rect x="2.9598%" y="85" width="0.1057%" height="15" fill="rgb(231,138,38)"/><text x="3.2098%" y="95.50"></text></g><g><title>flea`cranelift_codegen::verifier::locations::verify_locations (5 samples, 0.53%)</title><rect x="3.0655%" y="197" width="0.5285%" height="15" fill="rgb(231,145,46)"/><text x="3.3155%" y="207.50"></text></g><g><title>flea`cranelift_codegen::isa::constraints::RecipeConstraints::satisfied (3 samples, 0.32%)</title><rect x="3.2770%" y="181" width="0.3171%" height="15" fill="rgb(251,118,11)"/><text x="3.5270%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="3.4884%" y="165" width="0.1057%" height="15" fill="rgb(217,147,25)"/><text x="3.7384%" y="175.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute (1 samples, 0.11%)</title><rect x="3.5941%" y="181" width="0.1057%" height="15" fill="rgb(247,81,37)"/><text x="3.8441%" y="191.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute_ebb (1 samples, 0.11%)</title><rect x="3.5941%" y="165" width="0.1057%" height="15" fill="rgb(209,12,38)"/><text x="3.8441%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::ctrl_typevar (1 samples, 0.11%)</title><rect x="3.6998%" y="181" width="0.1057%" height="15" fill="rgb(227,1,9)"/><text x="3.9498%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::value_def (1 samples, 0.11%)</title><rect x="4.5455%" y="165" width="0.1057%" height="15" fill="rgb(248,47,43)"/><text x="4.7955%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::enc_tables::lookup_enclist (1 samples, 0.11%)</title><rect x="4.6512%" y="165" width="0.1057%" height="15" fill="rgb(221,10,30)"/><text x="4.9012%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::compute_result_type (1 samples, 0.11%)</title><rect x="4.9683%" y="149" width="0.1057%" height="15" fill="rgb(210,229,1)"/><text x="5.2183%" y="159.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::typecheck (4 samples, 0.42%)</title><rect x="4.7569%" y="165" width="0.4228%" height="15" fill="rgb(222,148,37)"/><text x="5.0069%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::analyze_branch (1 samples, 0.11%)</title><rect x="5.0740%" y="149" width="0.1057%" height="15" fill="rgb(234,67,33)"/><text x="5.3240%" y="159.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::run (14 samples, 1.48%)</title><rect x="3.8055%" y="181" width="1.4799%" height="15" fill="rgb(247,98,35)"/><text x="4.0555%" y="191.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::verify_value (1 samples, 0.11%)</title><rect x="5.1797%" y="165" width="0.1057%" height="15" fill="rgb(247,138,52)"/><text x="5.4297%" y="175.50"></text></g><g><title>flea`cranelift_codegen::context::Context::prologue_epilogue (22 samples, 2.33%)</title><rect x="3.0655%" y="213" width="2.3256%" height="15" fill="rgb(213,79,30)"/><text x="3.3155%" y="223.50">f..</text></g><g><title>flea`cranelift_codegen::verifier::verify_context (17 samples, 1.80%)</title><rect x="3.5941%" y="197" width="1.7970%" height="15" fill="rgb(246,177,23)"/><text x="3.8441%" y="207.50">f..</text></g><g><title>flea`cranelift_codegen::verifier::Verifier::verify_value_list (1 samples, 0.11%)</title><rect x="5.2854%" y="181" width="0.1057%" height="15" fill="rgb(230,62,27)"/><text x="5.5354%" y="191.50"></text></g><g><title>flea`cranelift_codegen::binemit::relaxation::relax_branches (2 samples, 0.21%)</title><rect x="5.3911%" y="197" width="0.2114%" height="15" fill="rgb(216,154,8)"/><text x="5.6411%" y="207.50"></text></g><g><title>flea`cranelift_codegen::regalloc::diversion::RegDiversions::apply (1 samples, 0.11%)</title><rect x="5.4968%" y="181" width="0.1057%" height="15" fill="rgb(244,35,45)"/><text x="5.7468%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::call_signature (1 samples, 0.11%)</title><rect x="5.6025%" y="197" width="0.1057%" height="15" fill="rgb(251,115,12)"/><text x="5.8525%" y="207.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="5.9197%" y="165" width="0.1057%" height="15" fill="rgb(240,54,50)"/><text x="6.1697%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::locations::verify_locations (4 samples, 0.42%)</title><rect x="5.7082%" y="197" width="0.4228%" height="15" fill="rgb(233,84,52)"/><text x="5.9582%" y="207.50"></text></g><g><title>flea`cranelift_codegen::isa::constraints::RecipeConstraints::satisfied (3 samples, 0.32%)</title><rect x="5.8140%" y="181" width="0.3171%" height="15" fill="rgb(207,117,47)"/><text x="6.0640%" y="191.50"></text></g><g><title>flea`cranelift_codegen::regalloc::diversion::RegDiversions::diversion (1 samples, 0.11%)</title><rect x="6.0254%" y="165" width="0.1057%" height="15" fill="rgb(249,43,39)"/><text x="6.2754%" y="175.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute (1 samples, 0.11%)</title><rect x="6.1311%" y="181" width="0.1057%" height="15" fill="rgb(209,38,44)"/><text x="6.3811%" y="191.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute_ebb (1 samples, 0.11%)</title><rect x="6.1311%" y="165" width="0.1057%" height="15" fill="rgb(236,212,23)"/><text x="6.3811%" y="175.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::x86::Isa as cranelift_codegen::isa::TargetIsa&gt;::legal_encodings (2 samples, 0.21%)</title><rect x="7.1882%" y="165" width="0.2114%" height="15" fill="rgb(242,79,21)"/><text x="7.4382%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::enc_tables::lookup_enclist (2 samples, 0.21%)</title><rect x="7.1882%" y="149" width="0.2114%" height="15" fill="rgb(211,96,35)"/><text x="7.4382%" y="159.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::value_is_attached (1 samples, 0.11%)</title><rect x="7.3996%" y="165" width="0.1057%" height="15" fill="rgb(253,215,40)"/><text x="7.6496%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="7.5053%" y="165" width="0.1057%" height="15" fill="rgb(211,81,21)"/><text x="7.7553%" y="175.50"></text></g><g><title>flea`cranelift_codegen::context::Context::relax_branches (23 samples, 2.43%)</title><rect x="5.3911%" y="213" width="2.4313%" height="15" fill="rgb(208,190,38)"/><text x="5.6411%" y="223.50">fl..</text></g><g><title>flea`cranelift_codegen::verifier::verify_context (16 samples, 1.69%)</title><rect x="6.1311%" y="197" width="1.6913%" height="15" fill="rgb(235,213,38)"/><text x="6.3811%" y="207.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::run (15 samples, 1.59%)</title><rect x="6.2368%" y="181" width="1.5856%" height="15" fill="rgb(237,122,38)"/><text x="6.4868%" y="191.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::typecheck (2 samples, 0.21%)</title><rect x="7.6110%" y="165" width="0.2114%" height="15" fill="rgb(244,218,35)"/><text x="7.8610%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::check_outgoing_args (1 samples, 0.11%)</title><rect x="7.7167%" y="149" width="0.1057%" height="15" fill="rgb(240,68,47)"/><text x="7.9667%" y="159.50"></text></g><g><title>flea`cranelift_codegen::dominator_tree::DominatorTree::compute (1 samples, 0.11%)</title><rect x="7.8224%" y="213" width="0.1057%" height="15" fill="rgb(210,16,53)"/><text x="8.0724%" y="223.50"></text></g><g><title>flea`&lt;&amp;mut cranelift_codegen::cursor::EncCursor as cranelift_codegen::ir::builder::InstInserterBase&gt;::insert_built_inst (1 samples, 0.11%)</title><rect x="8.4567%" y="165" width="0.1057%" height="15" fill="rgb(235,124,12)"/><text x="8.7067%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::layout::Layout::insert_inst (1 samples, 0.11%)</title><rect x="8.4567%" y="149" width="0.1057%" height="15" fill="rgb(224,169,11)"/><text x="8.7067%" y="159.50"></text></g><g><title>flea`alloc::vec::Vec&lt;T&gt;::resize (1 samples, 0.11%)</title><rect x="8.4567%" y="133" width="0.1057%" height="15" fill="rgb(250,166,2)"/><text x="8.7067%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`realloc (1 samples, 0.11%)</title><rect x="8.4567%" y="117" width="0.1057%" height="15" fill="rgb(242,216,29)"/><text x="8.7067%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (1 samples, 0.11%)</title><rect x="8.4567%" y="101" width="0.1057%" height="15" fill="rgb(230,116,27)"/><text x="8.7067%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (1 samples, 0.11%)</title><rect x="8.4567%" y="85" width="0.1057%" height="15" fill="rgb(228,99,48)"/><text x="8.7067%" y="95.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="8.4567%" y="69" width="0.1057%" height="15" fill="rgb(253,11,6)"/><text x="8.7067%" y="79.50"></text></g><g><title>flea`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve (1 samples, 0.11%)</title><rect x="8.5624%" y="165" width="0.1057%" height="15" fill="rgb(247,143,39)"/><text x="8.8124%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`realloc (1 samples, 0.11%)</title><rect x="8.5624%" y="149" width="0.1057%" height="15" fill="rgb(236,97,10)"/><text x="8.8124%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (1 samples, 0.11%)</title><rect x="8.5624%" y="133" width="0.1057%" height="15" fill="rgb(233,208,19)"/><text x="8.8124%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (1 samples, 0.11%)</title><rect x="8.5624%" y="117" width="0.1057%" height="15" fill="rgb(216,164,2)"/><text x="8.8124%" y="127.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="8.5624%" y="101" width="0.1057%" height="15" fill="rgb(220,129,5)"/><text x="8.8124%" y="111.50"></text></g><g><title>flea`cranelift_codegen::regalloc::coloring::Context::program_input_abi (2 samples, 0.21%)</title><rect x="8.6681%" y="165" width="0.2114%" height="15" fill="rgb(242,17,10)"/><text x="8.9181%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="8.7738%" y="149" width="0.1057%" height="15" fill="rgb(242,107,0)"/><text x="9.0238%" y="159.50"></text></g><g><title>flea`cranelift_codegen::regalloc::coloring::Coloring::run (12 samples, 1.27%)</title><rect x="8.0338%" y="197" width="1.2685%" height="15" fill="rgb(251,28,31)"/><text x="8.2838%" y="207.50"></text></g><g><title>flea`cranelift_codegen::regalloc::coloring::Context::visit_inst (11 samples, 1.16%)</title><rect x="8.1395%" y="181" width="1.1628%" height="15" fill="rgb(233,223,10)"/><text x="8.3895%" y="191.50"></text></g><g><title>flea`cranelift_codegen::regalloc::live_value_tracker::LiveValueTracker::process_inst (4 samples, 0.42%)</title><rect x="8.8795%" y="165" width="0.4228%" height="15" fill="rgb(215,21,27)"/><text x="9.1295%" y="175.50"></text></g><g><title>flea`cranelift_codegen::regalloc::liveness::get_or_create (2 samples, 0.21%)</title><rect x="9.5137%" y="181" width="0.2114%" height="15" fill="rgb(232,23,21)"/><text x="9.7637%" y="191.50"></text></g><g><title>flea`cranelift_entity::sparse::SparseMap&lt;K,V&gt;::insert (1 samples, 0.11%)</title><rect x="9.6195%" y="165" width="0.1057%" height="15" fill="rgb(244,5,23)"/><text x="9.8695%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`realloc (1 samples, 0.11%)</title><rect x="9.6195%" y="149" width="0.1057%" height="15" fill="rgb(226,81,46)"/><text x="9.8695%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (1 samples, 0.11%)</title><rect x="9.6195%" y="133" width="0.1057%" height="15" fill="rgb(247,70,30)"/><text x="9.8695%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (1 samples, 0.11%)</title><rect x="9.6195%" y="117" width="0.1057%" height="15" fill="rgb(212,68,19)"/><text x="9.8695%" y="127.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="9.6195%" y="101" width="0.1057%" height="15" fill="rgb(240,187,13)"/><text x="9.8695%" y="111.50"></text></g><g><title>flea`cranelift_codegen::regalloc::liveness::Liveness::compute (5 samples, 0.53%)</title><rect x="9.3023%" y="197" width="0.5285%" height="15" fill="rgb(223,113,26)"/><text x="9.5523%" y="207.50"></text></g><g><title>flea`cranelift_codegen::regalloc::liverange::GenericLiveRange&lt;PO&gt;::extend_in_ebb (1 samples, 0.11%)</title><rect x="9.7252%" y="181" width="0.1057%" height="15" fill="rgb(206,192,2)"/><text x="9.9752%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::builder::InstBuilder::fill (1 samples, 0.11%)</title><rect x="9.9366%" y="181" width="0.1057%" height="15" fill="rgb(241,108,4)"/><text x="10.1866%" y="191.50"></text></g><g><title>flea`&lt;&amp;mut cranelift_codegen::cursor::EncCursor as cranelift_codegen::ir::builder::InstInserterBase&gt;::insert_built_inst (1 samples, 0.11%)</title><rect x="9.9366%" y="165" width="0.1057%" height="15" fill="rgb(247,173,49)"/><text x="10.1866%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::TargetIsa::encode (1 samples, 0.11%)</title><rect x="9.9366%" y="149" width="0.1057%" height="15" fill="rgb(224,114,35)"/><text x="10.1866%" y="159.50"></text></g><g><title>flea`cranelift_codegen::isa::enc_tables::lookup_enclist (1 samples, 0.11%)</title><rect x="9.9366%" y="133" width="0.1057%" height="15" fill="rgb(245,159,27)"/><text x="10.1866%" y="143.50"></text></g><g><title>flea`cranelift_codegen::regalloc::reload::Reload::run (5 samples, 0.53%)</title><rect x="9.8309%" y="197" width="0.5285%" height="15" fill="rgb(245,172,44)"/><text x="10.0809%" y="207.50"></text></g><g><title>flea`cranelift_entity::sparse::SparseMap&lt;K,V&gt;::insert (3 samples, 0.32%)</title><rect x="10.0423%" y="181" width="0.3171%" height="15" fill="rgb(236,23,11)"/><text x="10.2923%" y="191.50"></text></g><g><title>flea`cranelift_codegen::regalloc::spilling::Spilling::run (3 samples, 0.32%)</title><rect x="10.3594%" y="197" width="0.3171%" height="15" fill="rgb(205,117,38)"/><text x="10.6094%" y="207.50"></text></g><g><title>flea`cranelift_codegen::verifier::liveness::verify_liveness (9 samples, 0.95%)</title><rect x="10.6765%" y="197" width="0.9514%" height="15" fill="rgb(237,72,25)"/><text x="10.9265%" y="207.50"></text></g><g><title>flea`cranelift_codegen::regalloc::liverange::GenericLiveRange&lt;PO&gt;::reaches_use (1 samples, 0.11%)</title><rect x="11.5222%" y="181" width="0.1057%" height="15" fill="rgb(244,70,9)"/><text x="11.7722%" y="191.50"></text></g><g><title>flea`cranelift_codegen::isa::constraints::RecipeConstraints::satisfied (3 samples, 0.32%)</title><rect x="11.7336%" y="181" width="0.3171%" height="15" fill="rgb(217,125,39)"/><text x="11.9836%" y="191.50"></text></g><g><title>flea`cranelift_codegen::regalloc::diversion::RegDiversions::diversion (2 samples, 0.21%)</title><rect x="11.8393%" y="165" width="0.2114%" height="15" fill="rgb(235,36,10)"/><text x="12.0893%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::locations::verify_locations (5 samples, 0.53%)</title><rect x="11.6279%" y="197" width="0.5285%" height="15" fill="rgb(251,123,47)"/><text x="11.8779%" y="207.50"></text></g><g><title>flea`cranelift_codegen::regalloc::diversion::RegDiversions::divert (1 samples, 0.11%)</title><rect x="12.0507%" y="181" width="0.1057%" height="15" fill="rgb(221,13,13)"/><text x="12.3007%" y="191.50"></text></g><g><title>flea`hashbrown::rustc_entry::_&lt;impl hashbrown::map::HashMap&lt;K,V,S&gt;&gt;::rustc_entry (1 samples, 0.11%)</title><rect x="12.0507%" y="165" width="0.1057%" height="15" fill="rgb(238,131,9)"/><text x="12.3007%" y="175.50"></text></g><g><title>flea`hashbrown::raw::RawTable&lt;T&gt;::reserve_rehash (1 samples, 0.11%)</title><rect x="12.0507%" y="149" width="0.1057%" height="15" fill="rgb(211,50,8)"/><text x="12.3007%" y="159.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::x86::Isa as cranelift_codegen::isa::TargetIsa&gt;::flags (1 samples, 0.11%)</title><rect x="12.1564%" y="181" width="0.1057%" height="15" fill="rgb(245,182,24)"/><text x="12.4064%" y="191.50"></text></g><g><title>flea`cranelift_codegen::dominator_tree::DominatorTree::with_function (2 samples, 0.21%)</title><rect x="12.2622%" y="181" width="0.2114%" height="15" fill="rgb(242,14,37)"/><text x="12.5122%" y="191.50"></text></g><g><title>flea`cranelift_codegen::dominator_tree::DominatorTree::compute (2 samples, 0.21%)</title><rect x="12.2622%" y="165" width="0.2114%" height="15" fill="rgb(246,228,12)"/><text x="12.5122%" y="175.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute (2 samples, 0.21%)</title><rect x="12.4736%" y="181" width="0.2114%" height="15" fill="rgb(213,55,15)"/><text x="12.7236%" y="191.50"></text></g><g><title>flea`cranelift_codegen::flowgraph::ControlFlowGraph::compute_ebb (2 samples, 0.21%)</title><rect x="12.4736%" y="165" width="0.2114%" height="15" fill="rgb(209,9,3)"/><text x="12.7236%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::call_signature (1 samples, 0.11%)</title><rect x="12.6850%" y="181" width="0.1057%" height="15" fill="rgb(230,59,30)"/><text x="12.9350%" y="191.50"></text></g><g><title>flea`&lt;cranelift_codegen::ir::layout::Layout as cranelift_codegen::ir::progpoint::ProgramOrder&gt;::cmp (1 samples, 0.11%)</title><rect x="14.2706%" y="165" width="0.1057%" height="15" fill="rgb(209,121,21)"/><text x="14.5206%" y="175.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::enc_tables::Encodings as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.21%)</title><rect x="14.3763%" y="165" width="0.2114%" height="15" fill="rgb(220,109,13)"/><text x="14.6263%" y="175.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::x86::Isa as cranelift_codegen::isa::TargetIsa&gt;::legal_encodings (2 samples, 0.21%)</title><rect x="14.5877%" y="165" width="0.2114%" height="15" fill="rgb(232,18,1)"/><text x="14.8377%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::enc_tables::lookup_enclist (2 samples, 0.21%)</title><rect x="14.5877%" y="149" width="0.2114%" height="15" fill="rgb(215,41,42)"/><text x="14.8377%" y="159.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::ctrl_typevar (4 samples, 0.42%)</title><rect x="14.7992%" y="165" width="0.4228%" height="15" fill="rgb(224,123,36)"/><text x="15.0492%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::typevar_operand (1 samples, 0.11%)</title><rect x="15.1163%" y="149" width="0.1057%" height="15" fill="rgb(240,125,3)"/><text x="15.3663%" y="159.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::value_def (2 samples, 0.21%)</title><rect x="15.2220%" y="165" width="0.2114%" height="15" fill="rgb(205,98,50)"/><text x="15.4720%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::value_is_attached (2 samples, 0.21%)</title><rect x="15.4334%" y="165" width="0.2114%" height="15" fill="rgb(205,185,37)"/><text x="15.6834%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::OperandConstraint::resolve (1 samples, 0.11%)</title><rect x="15.6448%" y="165" width="0.1057%" height="15" fill="rgb(238,207,15)"/><text x="15.8948%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::ValueTypeSet::contains (2 samples, 0.21%)</title><rect x="15.7505%" y="165" width="0.2114%" height="15" fill="rgb(213,199,42)"/><text x="16.0005%" y="175.50"></text></g><g><title>flea`cranelift_codegen::isa::enc_tables::lookup_enclist (1 samples, 0.11%)</title><rect x="15.9619%" y="165" width="0.1057%" height="15" fill="rgb(235,201,11)"/><text x="16.2119%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::ctrl_typevar (1 samples, 0.11%)</title><rect x="17.0190%" y="149" width="0.1057%" height="15" fill="rgb(207,46,11)"/><text x="17.2690%" y="159.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::typevar_operand (1 samples, 0.11%)</title><rect x="17.0190%" y="133" width="0.1057%" height="15" fill="rgb(241,35,35)"/><text x="17.2690%" y="143.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::typecheck (11 samples, 1.16%)</title><rect x="16.0677%" y="165" width="1.1628%" height="15" fill="rgb(243,32,47)"/><text x="16.3177%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::analyze_branch (1 samples, 0.11%)</title><rect x="17.1247%" y="149" width="0.1057%" height="15" fill="rgb(247,202,23)"/><text x="17.3747%" y="159.50"></text></g><g><title>flea`cranelift_codegen::regalloc::context::Context::run (89 samples, 9.41%)</title><rect x="7.9281%" y="213" width="9.4080%" height="15" fill="rgb(219,102,11)"/><text x="8.1781%" y="223.50">flea`cranelif..</text></g><g><title>flea`cranelift_codegen::verifier::verify_context (49 samples, 5.18%)</title><rect x="12.1564%" y="197" width="5.1797%" height="15" fill="rgb(243,110,44)"/><text x="12.4064%" y="207.50">flea`c..</text></g><g><title>flea`cranelift_codegen::verifier::Verifier::run (43 samples, 4.55%)</title><rect x="12.7907%" y="181" width="4.5455%" height="15" fill="rgb(222,74,54)"/><text x="13.0407%" y="191.50">flea`..</text></g><g><title>flea`cranelift_codegen::verifier::flags::verify_flags (1 samples, 0.11%)</title><rect x="17.2304%" y="165" width="0.1057%" height="15" fill="rgb(216,99,12)"/><text x="17.4804%" y="175.50"></text></g><g><title>flea`&lt;cranelift_codegen::isa::enc_tables::Encodings as core::iter::traits::iterator::Iterator&gt;::next (2 samples, 0.21%)</title><rect x="18.0761%" y="181" width="0.2114%" height="15" fill="rgb(226,22,26)"/><text x="18.3261%" y="191.50"></text></g><g><title>flea`cranelift_codegen::dominator_tree::DominatorTree::last_dominator (1 samples, 0.11%)</title><rect x="18.2875%" y="181" width="0.1057%" height="15" fill="rgb(217,163,10)"/><text x="18.5375%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::ctrl_typevar (1 samples, 0.11%)</title><rect x="18.3932%" y="181" width="0.1057%" height="15" fill="rgb(213,25,53)"/><text x="18.6432%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::compute_result_type (1 samples, 0.11%)</title><rect x="18.6047%" y="165" width="0.1057%" height="15" fill="rgb(252,105,26)"/><text x="18.8547%" y="175.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::typecheck (3 samples, 0.32%)</title><rect x="18.4989%" y="181" width="0.3171%" height="15" fill="rgb(220,39,43)"/><text x="18.7489%" y="191.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::check_outgoing_args (1 samples, 0.11%)</title><rect x="18.7104%" y="165" width="0.1057%" height="15" fill="rgb(229,68,48)"/><text x="18.9604%" y="175.50"></text></g><g><title>flea`cranelift_codegen::ir::instructions::InstructionData::arguments (1 samples, 0.11%)</title><rect x="18.7104%" y="149" width="0.1057%" height="15" fill="rgb(252,8,32)"/><text x="18.9604%" y="159.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::verify_value_list (1 samples, 0.11%)</title><rect x="18.8161%" y="181" width="0.1057%" height="15" fill="rgb(223,20,43)"/><text x="19.0661%" y="191.50"></text></g><g><title>flea`cranelift_codegen::verifier::Verifier::run (16 samples, 1.69%)</title><rect x="17.3362%" y="197" width="1.6913%" height="15" fill="rgb(229,81,49)"/><text x="17.5862%" y="207.50"></text></g><g><title>flea`cranelift_codegen::verifier::flags::verify_flags (1 samples, 0.11%)</title><rect x="18.9218%" y="181" width="0.1057%" height="15" fill="rgb(236,28,36)"/><text x="19.1718%" y="191.50"></text></g><g><title>flea`cranelift_module::module::Module&lt;B&gt;::define_function (176 samples, 18.60%)</title><rect x="0.5285%" y="245" width="18.6047%" height="15" fill="rgb(249,185,26)"/><text x="0.7785%" y="255.50">flea`cranelift_module::module..</text></g><g><title>flea`cranelift_codegen::context::Context::compile (172 samples, 18.18%)</title><rect x="0.9514%" y="229" width="18.1818%" height="15" fill="rgb(249,174,33)"/><text x="1.2014%" y="239.50">flea`cranelift_codegen::cont..</text></g><g><title>flea`cranelift_codegen::verifier::verify_context (17 samples, 1.80%)</title><rect x="17.3362%" y="213" width="1.7970%" height="15" fill="rgb(233,201,37)"/><text x="17.5862%" y="223.50">f..</text></g><g><title>flea`cranelift_codegen::verifier::Verifier::verify_value (1 samples, 0.11%)</title><rect x="19.0275%" y="197" width="0.1057%" height="15" fill="rgb(221,78,26)"/><text x="19.2775%" y="207.50"></text></g><g><title>flea`cranelift_module::module::Module&lt;B&gt;::finalize_definitions (1 samples, 0.11%)</title><rect x="19.1332%" y="245" width="0.1057%" height="15" fill="rgb(250,127,30)"/><text x="19.3832%" y="255.50"></text></g><g><title>flea`&lt;cranelift_simplejit::backend::SimpleJITBackend as cranelift_module::backend::Backend&gt;::finalize_function (1 samples, 0.11%)</title><rect x="19.1332%" y="229" width="0.1057%" height="15" fill="rgb(230,49,44)"/><text x="19.3832%" y="239.50"></text></g><g><title>flea`cranelift_simplejit::backend::SimpleJITBackend::lookup_symbol (1 samples, 0.11%)</title><rect x="19.1332%" y="213" width="0.1057%" height="15" fill="rgb(229,67,23)"/><text x="19.3832%" y="223.50"></text></g><g><title>flea`hashbrown::map::make_hash (1 samples, 0.11%)</title><rect x="19.1332%" y="197" width="0.1057%" height="15" fill="rgb(249,83,47)"/><text x="19.3832%" y="207.50"></text></g><g><title>flea`&lt;std::collections::hash::map::DefaultHasher as core::hash::Hasher&gt;::write (1 samples, 0.11%)</title><rect x="19.1332%" y="181" width="0.1057%" height="15" fill="rgb(215,43,3)"/><text x="19.3832%" y="191.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::make_inst_results (1 samples, 0.11%)</title><rect x="19.5560%" y="197" width="0.1057%" height="15" fill="rgb(238,154,13)"/><text x="19.8060%" y="207.50"></text></g><g><title>flea`cranelift_entity::list::EntityList&lt;T&gt;::push (1 samples, 0.11%)</title><rect x="19.5560%" y="181" width="0.1057%" height="15" fill="rgb(219,56,2)"/><text x="19.8060%" y="191.50"></text></g><g><title>flea`&lt;cranelift_frontend::frontend::FuncInstBuilder as cranelift_codegen::ir::builder::InstBuilderBase&gt;::build (3 samples, 0.32%)</title><rect x="19.4503%" y="213" width="0.3171%" height="15" fill="rgb(233,0,4)"/><text x="19.7003%" y="223.50"></text></g><g><title>flea`cranelift_frontend::frontend::FunctionBuilder::ensure_inserted_ebb (1 samples, 0.11%)</title><rect x="19.6617%" y="197" width="0.1057%" height="15" fill="rgb(235,30,7)"/><text x="19.9117%" y="207.50"></text></g><g><title>flea`cranelift_frontend::frontend::FunctionBuilder::import_signature (1 samples, 0.11%)</title><rect x="19.7674%" y="213" width="0.1057%" height="15" fill="rgb(250,79,13)"/><text x="20.0174%" y="223.50"></text></g><g><title>flea`cranelift_codegen::ir::function::Function::import_signature (1 samples, 0.11%)</title><rect x="19.7674%" y="197" width="0.1057%" height="15" fill="rgb(211,146,34)"/><text x="20.0174%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`free (1 samples, 0.11%)</title><rect x="19.9789%" y="197" width="0.1057%" height="15" fill="rgb(228,22,38)"/><text x="20.2289%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="20.0846%" y="197" width="0.1057%" height="15" fill="rgb(235,168,5)"/><text x="20.3346%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1 samples, 0.11%)</title><rect x="20.0846%" y="181" width="0.1057%" height="15" fill="rgb(221,155,16)"/><text x="20.3346%" y="191.50"></text></g><g><title>flea`flea::backend::get_cranelift_type (4 samples, 0.42%)</title><rect x="19.8732%" y="213" width="0.4228%" height="15" fill="rgb(215,215,53)"/><text x="20.1232%" y="223.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="20.1903%" y="197" width="0.1057%" height="15" fill="rgb(223,4,10)"/><text x="20.4403%" y="207.50"></text></g><g><title>flea`flea::backend::FunctionBackend::compile_id (11 samples, 1.16%)</title><rect x="19.2389%" y="229" width="1.1628%" height="15" fill="rgb(234,103,6)"/><text x="19.4889%" y="239.50"></text></g><g><title>flea`flea::semantic::Semantic::scope_get (1 samples, 0.11%)</title><rect x="20.2960%" y="213" width="0.1057%" height="15" fill="rgb(227,97,0)"/><text x="20.5460%" y="223.50"></text></g><g><title>flea`alloc::fmt::format (1 samples, 0.11%)</title><rect x="20.2960%" y="197" width="0.1057%" height="15" fill="rgb(234,150,53)"/><text x="20.5460%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`malloc (1 samples, 0.11%)</title><rect x="20.2960%" y="181" width="0.1057%" height="15" fill="rgb(228,201,54)"/><text x="20.5460%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (1 samples, 0.11%)</title><rect x="20.2960%" y="165" width="0.1057%" height="15" fill="rgb(222,22,37)"/><text x="20.5460%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (1 samples, 0.11%)</title><rect x="20.2960%" y="149" width="0.1057%" height="15" fill="rgb(237,53,32)"/><text x="20.5460%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (1 samples, 0.11%)</title><rect x="20.2960%" y="133" width="0.1057%" height="15" fill="rgb(233,25,53)"/><text x="20.5460%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (1 samples, 0.11%)</title><rect x="20.2960%" y="117" width="0.1057%" height="15" fill="rgb(210,40,34)"/><text x="20.5460%" y="127.50"></text></g><g><title>flea`cranelift_codegen::ir::dfg::DataFlowGraph::make_inst (1 samples, 0.11%)</title><rect x="20.4017%" y="197" width="0.1057%" height="15" fill="rgb(241,220,44)"/><text x="20.6517%" y="207.50"></text></g><g><title>flea`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve (1 samples, 0.11%)</title><rect x="20.4017%" y="181" width="0.1057%" height="15" fill="rgb(235,28,35)"/><text x="20.6517%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`realloc (1 samples, 0.11%)</title><rect x="20.4017%" y="165" width="0.1057%" height="15" fill="rgb(210,56,17)"/><text x="20.6517%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (1 samples, 0.11%)</title><rect x="20.4017%" y="149" width="0.1057%" height="15" fill="rgb(224,130,29)"/><text x="20.6517%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (1 samples, 0.11%)</title><rect x="20.4017%" y="133" width="0.1057%" height="15" fill="rgb(235,212,8)"/><text x="20.6517%" y="143.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (1 samples, 0.11%)</title><rect x="20.4017%" y="117" width="0.1057%" height="15" fill="rgb(223,33,50)"/><text x="20.6517%" y="127.50"></text></g><g><title>flea`cranelift_codegen::ir::layout::Layout::append_inst (1 samples, 0.11%)</title><rect x="20.5074%" y="197" width="0.1057%" height="15" fill="rgb(219,149,13)"/><text x="20.7574%" y="207.50"></text></g><g><title>flea`alloc::vec::Vec&lt;T&gt;::resize (1 samples, 0.11%)</title><rect x="20.5074%" y="181" width="0.1057%" height="15" fill="rgb(250,156,29)"/><text x="20.7574%" y="191.50"></text></g><g><title>flea`flea::backend::FunctionBackend::compile_id (14 samples, 1.48%)</title><rect x="19.2389%" y="245" width="1.4799%" height="15" fill="rgb(216,193,19)"/><text x="19.4889%" y="255.50"></text></g><g><title>flea`flea::backend::FunctionBackend::store_value (3 samples, 0.32%)</title><rect x="20.4017%" y="229" width="0.3171%" height="15" fill="rgb(216,135,14)"/><text x="20.6517%" y="239.50"></text></g><g><title>flea`&lt;cranelift_frontend::frontend::FuncInstBuilder as cranelift_codegen::ir::builder::InstBuilderBase&gt;::build (3 samples, 0.32%)</title><rect x="20.4017%" y="213" width="0.3171%" height="15" fill="rgb(241,47,5)"/><text x="20.6517%" y="223.50"></text></g><g><title>flea`cranelift_codegen::ir::layout::Layout::assign_inst_seq (1 samples, 0.11%)</title><rect x="20.6131%" y="197" width="0.1057%" height="15" fill="rgb(233,42,35)"/><text x="20.8631%" y="207.50"></text></g><g><title>flea`flea::parser::Lexer::prefix (1 samples, 0.11%)</title><rect x="20.7188%" y="197" width="0.1057%" height="15" fill="rgb(231,13,6)"/><text x="20.9688%" y="207.50"></text></g><g><title>flea`flea::parser::Parser::expect (2 samples, 0.21%)</title><rect x="20.7188%" y="229" width="0.2114%" height="15" fill="rgb(207,181,40)"/><text x="20.9688%" y="239.50"></text></g><g><title>flea`flea::parser::Lexer::pop (2 samples, 0.21%)</title><rect x="20.7188%" y="213" width="0.2114%" height="15" fill="rgb(254,173,49)"/><text x="20.9688%" y="223.50"></text></g><g><title>flea`flea::parser::Lexer::prefix_keyword (1 samples, 0.11%)</title><rect x="20.8245%" y="197" width="0.1057%" height="15" fill="rgb(221,1,38)"/><text x="21.0745%" y="207.50"></text></g><g><title>libsystem_platform.dylib`_platform_memcmp (1 samples, 0.11%)</title><rect x="20.8245%" y="181" width="0.1057%" height="15" fill="rgb(206,124,46)"/><text x="21.0745%" y="191.50"></text></g><g><title>flea`flea::parser::Parser::expect_range (1 samples, 0.11%)</title><rect x="20.9302%" y="229" width="0.1057%" height="15" fill="rgb(249,21,11)"/><text x="21.1802%" y="239.50"></text></g><g><title>flea`flea::parser::Lexer::pop (1 samples, 0.11%)</title><rect x="20.9302%" y="213" width="0.1057%" height="15" fill="rgb(222,201,40)"/><text x="21.1802%" y="223.50"></text></g><g><title>flea`flea::parser::Lexer::prefix_keyword (1 samples, 0.11%)</title><rect x="20.9302%" y="197" width="0.1057%" height="15" fill="rgb(235,61,29)"/><text x="21.1802%" y="207.50"></text></g><g><title>flea`flea::parser::Parser::expect (2 samples, 0.21%)</title><rect x="21.0359%" y="213" width="0.2114%" height="15" fill="rgb(219,207,3)"/><text x="21.2859%" y="223.50"></text></g><g><title>flea`flea::parser::Lexer::pop (2 samples, 0.21%)</title><rect x="21.0359%" y="197" width="0.2114%" height="15" fill="rgb(222,56,46)"/><text x="21.2859%" y="207.50"></text></g><g><title>flea`flea::parser::Lexer::prefix_keyword (2 samples, 0.21%)</title><rect x="21.0359%" y="181" width="0.2114%" height="15" fill="rgb(239,76,54)"/><text x="21.2859%" y="191.50"></text></g><g><title>flea`flea::parser::Parser::expect_range (2 samples, 0.21%)</title><rect x="21.2474%" y="213" width="0.2114%" height="15" fill="rgb(231,124,27)"/><text x="21.4974%" y="223.50"></text></g><g><title>flea`flea::parser::Lexer::pop (2 samples, 0.21%)</title><rect x="21.2474%" y="197" width="0.2114%" height="15" fill="rgb(249,195,6)"/><text x="21.4974%" y="207.50"></text></g><g><title>flea`flea::parser::Lexer::prefix_keyword (1 samples, 0.11%)</title><rect x="21.3531%" y="181" width="0.1057%" height="15" fill="rgb(237,174,47)"/><text x="21.6031%" y="191.50"></text></g><g><title>flea`flea::parser::Lexer::pop (5 samples, 0.53%)</title><rect x="21.4588%" y="197" width="0.5285%" height="15" fill="rgb(206,201,31)"/><text x="21.7088%" y="207.50"></text></g><g><title>flea`flea::parser::Lexer::prefix (2 samples, 0.21%)</title><rect x="21.7759%" y="181" width="0.2114%" height="15" fill="rgb(231,57,52)"/><text x="22.0259%" y="191.50"></text></g><g><title>flea`flea::parser::Parser::parse_lvalue (7 samples, 0.74%)</title><rect x="21.4588%" y="213" width="0.7400%" height="15" fill="rgb(248,177,22)"/><text x="21.7088%" y="223.50"></text></g><g><title>flea`flea::parser::Parser::push_node (2 samples, 0.21%)</title><rect x="21.9873%" y="197" width="0.2114%" height="15" fill="rgb(215,211,37)"/><text x="22.2373%" y="207.50"></text></g><g><title>flea`flea::parser::Parser::parse_expression (15 samples, 1.59%)</title><rect x="21.0359%" y="229" width="1.5856%" height="15" fill="rgb(241,128,51)"/><text x="21.2859%" y="239.50"></text></g><g><title>flea`flea::parser::Parser::push_node (4 samples, 0.42%)</title><rect x="22.1987%" y="213" width="0.4228%" height="15" fill="rgb(227,165,31)"/><text x="22.4487%" y="223.50"></text></g><g><title>libsystem_malloc.dylib`realloc (4 samples, 0.42%)</title><rect x="22.1987%" y="197" width="0.4228%" height="15" fill="rgb(228,167,24)"/><text x="22.4487%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_realloc (4 samples, 0.42%)</title><rect x="22.1987%" y="181" width="0.4228%" height="15" fill="rgb(228,143,12)"/><text x="22.4487%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`szone_realloc (4 samples, 0.42%)</title><rect x="22.1987%" y="165" width="0.4228%" height="15" fill="rgb(249,149,8)"/><text x="22.4487%" y="175.50"></text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (4 samples, 0.42%)</title><rect x="22.1987%" y="149" width="0.4228%" height="15" fill="rgb(243,35,44)"/><text x="22.4487%" y="159.50"></text></g><g><title>flea`flea::parser::Parser::parse (19 samples, 2.01%)</title><rect x="20.7188%" y="245" width="2.0085%" height="15" fill="rgb(246,89,9)"/><text x="20.9688%" y="255.50">f..</text></g><g><title>libsystem_malloc.dylib`malloc (1 samples, 0.11%)</title><rect x="22.6216%" y="229" width="0.1057%" height="15" fill="rgb(233,213,13)"/><text x="22.8716%" y="239.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (1 samples, 0.11%)</title><rect x="22.6216%" y="213" width="0.1057%" height="15" fill="rgb(233,141,41)"/><text x="22.8716%" y="223.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (1 samples, 0.11%)</title><rect x="22.6216%" y="197" width="0.1057%" height="15" fill="rgb(239,167,4)"/><text x="22.8716%" y="207.50"></text></g><g><title>flea`flea::semantic::Semantic::assign_type (1 samples, 0.11%)</title><rect x="22.8330%" y="165" width="0.1057%" height="15" fill="rgb(209,217,16)"/><text x="23.0830%" y="175.50"></text></g><g><title>flea`flea::semantic::Semantic::match_types (1 samples, 0.11%)</title><rect x="22.8330%" y="149" width="0.1057%" height="15" fill="rgb(219,88,35)"/><text x="23.0830%" y="159.50"></text></g><g><title>flea`flea::semantic::Semantic::find_type_array_index (1 samples, 0.11%)</title><rect x="22.8330%" y="133" width="0.1057%" height="15" fill="rgb(220,193,23)"/><text x="23.0830%" y="143.50"></text></g><g><title>flea`flea::semantic::Semantic::find_type_array_index (175 samples, 18.50%)</title><rect x="23.0444%" y="149" width="18.4989%" height="15" fill="rgb(230,90,52)"/><text x="23.2944%" y="159.50">flea`flea::semantic::Semantic..</text></g><g><title>flea`flea::semantic::Semantic::match_types (1 samples, 0.11%)</title><rect x="41.5433%" y="149" width="0.1057%" height="15" fill="rgb(252,106,19)"/><text x="41.7933%" y="159.50"></text></g><g><title>flea`flea::semantic::Semantic::match_types (179 samples, 18.92%)</title><rect x="22.9387%" y="165" width="18.9218%" height="15" fill="rgb(206,74,20)"/><text x="23.1887%" y="175.50">flea`flea::semantic::Semantic:..</text></g><g><title>libsystem_malloc.dylib`free_tiny (2 samples, 0.21%)</title><rect x="41.6490%" y="149" width="0.2114%" height="15" fill="rgb(230,138,44)"/><text x="41.8990%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (1 samples, 0.11%)</title><rect x="41.7548%" y="133" width="0.1057%" height="15" fill="rgb(235,182,43)"/><text x="42.0048%" y="143.50"></text></g><g><title>flea`alloc::fmt::format (1 samples, 0.11%)</title><rect x="41.8605%" y="149" width="0.1057%" height="15" fill="rgb(242,16,51)"/><text x="42.1105%" y="159.50"></text></g><g><title>flea`core::fmt::write (1 samples, 0.11%)</title><rect x="41.8605%" y="133" width="0.1057%" height="15" fill="rgb(248,9,4)"/><text x="42.1105%" y="143.50"></text></g><g><title>flea`flea::semantic::Semantic::assign_type (183 samples, 19.34%)</title><rect x="22.8330%" y="181" width="19.3446%" height="15" fill="rgb(210,31,22)"/><text x="23.0830%" y="191.50">flea`flea::semantic::Semantic:..</text></g><g><title>flea`flea::semantic::Semantic::scope_get (3 samples, 0.32%)</title><rect x="41.8605%" y="165" width="0.3171%" height="15" fill="rgb(239,54,39)"/><text x="42.1105%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`free (2 samples, 0.21%)</title><rect x="41.9662%" y="149" width="0.2114%" height="15" fill="rgb(230,99,41)"/><text x="42.2162%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_size (1 samples, 0.11%)</title><rect x="42.0719%" y="133" width="0.1057%" height="15" fill="rgb(253,106,12)"/><text x="42.3219%" y="143.50"></text></g><g><title>flea`flea::semantic::Semantic::find_type_array_index (203 samples, 21.46%)</title><rect x="42.2833%" y="165" width="21.4588%" height="15" fill="rgb(213,46,41)"/><text x="42.5333%" y="175.50">flea`flea::semantic::Semantic::fin..</text></g><g><title>libsystem_malloc.dylib`malloc (2 samples, 0.21%)</title><rect x="63.5307%" y="149" width="0.2114%" height="15" fill="rgb(215,133,35)"/><text x="63.7807%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (2 samples, 0.21%)</title><rect x="63.5307%" y="133" width="0.2114%" height="15" fill="rgb(213,28,5)"/><text x="63.7807%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (2 samples, 0.21%)</title><rect x="63.5307%" y="117" width="0.2114%" height="15" fill="rgb(215,77,49)"/><text x="63.7807%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (2 samples, 0.21%)</title><rect x="63.5307%" y="101" width="0.2114%" height="15" fill="rgb(248,100,22)"/><text x="63.7807%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (2 samples, 0.21%)</title><rect x="63.5307%" y="85" width="0.2114%" height="15" fill="rgb(208,67,9)"/><text x="63.7807%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="63.7421%" y="165" width="0.1057%" height="15" fill="rgb(219,133,21)"/><text x="63.9921%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1 samples, 0.11%)</title><rect x="63.7421%" y="149" width="0.1057%" height="15" fill="rgb(246,46,29)"/><text x="63.9921%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (1 samples, 0.11%)</title><rect x="63.9535%" y="117" width="0.1057%" height="15" fill="rgb(246,185,52)"/><text x="64.2035%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`malloc (4 samples, 0.42%)</title><rect x="63.8478%" y="165" width="0.4228%" height="15" fill="rgb(252,136,11)"/><text x="64.0978%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (3 samples, 0.32%)</title><rect x="63.9535%" y="149" width="0.3171%" height="15" fill="rgb(219,138,53)"/><text x="64.2035%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (3 samples, 0.32%)</title><rect x="63.9535%" y="133" width="0.3171%" height="15" fill="rgb(211,51,23)"/><text x="64.2035%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (2 samples, 0.21%)</title><rect x="64.0592%" y="117" width="0.2114%" height="15" fill="rgb(247,221,28)"/><text x="64.3092%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (1 samples, 0.11%)</title><rect x="64.1649%" y="101" width="0.1057%" height="15" fill="rgb(251,222,45)"/><text x="64.4149%" y="111.50"></text></g><g><title>flea`flea::semantic::Semantic::match_types (210 samples, 22.20%)</title><rect x="42.1776%" y="181" width="22.1987%" height="15" fill="rgb(217,162,53)"/><text x="42.4276%" y="191.50">flea`flea::semantic::Semantic::matc..</text></g><g><title>libsystem_malloc.dylib`szone_size (1 samples, 0.11%)</title><rect x="64.2706%" y="165" width="0.1057%" height="15" fill="rgb(229,93,14)"/><text x="64.5206%" y="175.50"></text></g><g><title>flea`alloc::fmt::format (2 samples, 0.21%)</title><rect x="64.4820%" y="165" width="0.2114%" height="15" fill="rgb(209,67,49)"/><text x="64.7320%" y="175.50"></text></g><g><title>flea`core::fmt::write (1 samples, 0.11%)</title><rect x="64.5877%" y="149" width="0.1057%" height="15" fill="rgb(213,87,29)"/><text x="64.8377%" y="159.50"></text></g><g><title>flea`core::fmt::Formatter::pad (1 samples, 0.11%)</title><rect x="64.5877%" y="133" width="0.1057%" height="15" fill="rgb(205,151,52)"/><text x="64.8377%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`free (1 samples, 0.11%)</title><rect x="64.6934%" y="165" width="0.1057%" height="15" fill="rgb(253,215,39)"/><text x="64.9434%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_size (1 samples, 0.11%)</title><rect x="64.6934%" y="149" width="0.1057%" height="15" fill="rgb(221,220,41)"/><text x="64.9434%" y="159.50"></text></g><g><title>flea`flea::semantic::Semantic::scope_get (5 samples, 0.53%)</title><rect x="64.3763%" y="181" width="0.5285%" height="15" fill="rgb(218,133,21)"/><text x="64.6263%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="64.7992%" y="165" width="0.1057%" height="15" fill="rgb(221,193,43)"/><text x="65.0492%" y="175.50"></text></g><g><title>flea`flea::semantic::Semantic::assign_type (400 samples, 42.28%)</title><rect x="22.7273%" y="197" width="42.2833%" height="15" fill="rgb(240,128,52)"/><text x="22.9773%" y="207.50">flea`flea::semantic::Semantic::assign_type</text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="64.9049%" y="181" width="0.1057%" height="15" fill="rgb(253,114,12)"/><text x="65.1549%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1 samples, 0.11%)</title><rect x="64.9049%" y="165" width="0.1057%" height="15" fill="rgb(215,223,47)"/><text x="65.1549%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (1 samples, 0.11%)</title><rect x="99.2600%" y="149" width="0.1057%" height="15" fill="rgb(248,225,23)"/><text x="99.5100%" y="159.50"></text></g><g><title>flea`flea::semantic::Semantic::find_type_array_index (325 samples, 34.36%)</title><rect x="65.1163%" y="181" width="34.3552%" height="15" fill="rgb(250,108,0)"/><text x="65.3663%" y="191.50">flea`flea::semantic::Semantic::find_type_array_index</text></g><g><title>libsystem_malloc.dylib`malloc (2 samples, 0.21%)</title><rect x="99.2600%" y="165" width="0.2114%" height="15" fill="rgb(228,208,7)"/><text x="99.5100%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`malloc_zone_malloc (1 samples, 0.11%)</title><rect x="99.3658%" y="149" width="0.1057%" height="15" fill="rgb(244,45,10)"/><text x="99.6158%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (1 samples, 0.11%)</title><rect x="99.3658%" y="133" width="0.1057%" height="15" fill="rgb(207,125,25)"/><text x="99.6158%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (1 samples, 0.11%)</title><rect x="99.3658%" y="117" width="0.1057%" height="15" fill="rgb(210,195,18)"/><text x="99.6158%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (1 samples, 0.11%)</title><rect x="99.3658%" y="101" width="0.1057%" height="15" fill="rgb(249,80,12)"/><text x="99.6158%" y="111.50"></text></g><g><title>flea`flea::semantic::Semantic::assign_top_level_types (727 samples, 76.85%)</title><rect x="22.7273%" y="245" width="76.8499%" height="15" fill="rgb(221,65,9)"/><text x="22.9773%" y="255.50">flea`flea::semantic::Semantic::assign_top_level_types</text></g><g><title>flea`flea::semantic::Semantic::assign_type (727 samples, 76.85%)</title><rect x="22.7273%" y="229" width="76.8499%" height="15" fill="rgb(235,49,36)"/><text x="22.9773%" y="239.50">flea`flea::semantic::Semantic::assign_type</text></g><g><title>flea`flea::semantic::Semantic::assign_type (727 samples, 76.85%)</title><rect x="22.7273%" y="213" width="76.8499%" height="15" fill="rgb(225,32,20)"/><text x="22.9773%" y="223.50">flea`flea::semantic::Semantic::assign_type</text></g><g><title>flea`flea::semantic::Semantic::match_types (327 samples, 34.57%)</title><rect x="65.0106%" y="197" width="34.5666%" height="15" fill="rgb(215,141,46)"/><text x="65.2606%" y="207.50">flea`flea::semantic::Semantic::match_types</text></g><g><title>libsystem_malloc.dylib`free_tiny (1 samples, 0.11%)</title><rect x="99.4715%" y="181" width="0.1057%" height="15" fill="rgb(250,160,47)"/><text x="99.7215%" y="191.50"></text></g><g><title>flea`flea::backend::Backend::bootstrap_from_source (942 samples, 99.58%)</title><rect x="0.1057%" y="261" width="99.5772%" height="15" fill="rgb(216,222,40)"/><text x="0.3557%" y="271.50">flea`flea::backend::Backend::bootstrap_from_source</text></g><g><title>flea`std::io::stdio::_print (1 samples, 0.11%)</title><rect x="99.5772%" y="245" width="0.1057%" height="15" fill="rgb(234,217,39)"/><text x="99.8272%" y="255.50"></text></g><g><title>flea`&lt;std::io::stdio::Stdout as std::io::Write&gt;::write_fmt (1 samples, 0.11%)</title><rect x="99.5772%" y="229" width="0.1057%" height="15" fill="rgb(207,178,40)"/><text x="99.8272%" y="239.50"></text></g><g><title>flea`core::fmt::write (1 samples, 0.11%)</title><rect x="99.5772%" y="213" width="0.1057%" height="15" fill="rgb(221,136,13)"/><text x="99.8272%" y="223.50"></text></g><g><title>flea`&lt;std::io::Write::write_fmt::Adaptor&lt;T&gt; as core::fmt::Write&gt;::write_str (1 samples, 0.11%)</title><rect x="99.5772%" y="197" width="0.1057%" height="15" fill="rgb(249,199,10)"/><text x="99.8272%" y="207.50"></text></g><g><title>flea`std::io::Write::write_all (1 samples, 0.11%)</title><rect x="99.5772%" y="181" width="0.1057%" height="15" fill="rgb(249,222,13)"/><text x="99.8272%" y="191.50"></text></g><g><title>flea`&lt;std::io::buffered::LineWriter&lt;W&gt; as std::io::Write&gt;::write (1 samples, 0.11%)</title><rect x="99.5772%" y="165" width="0.1057%" height="15" fill="rgb(244,185,38)"/><text x="99.8272%" y="175.50"></text></g><g><title>libsystem_kernel.dylib`write (1 samples, 0.11%)</title><rect x="99.5772%" y="149" width="0.1057%" height="15" fill="rgb(236,202,9)"/><text x="99.8272%" y="159.50"></text></g><g><title>flea`main (944 samples, 99.79%)</title><rect x="0.0000%" y="357" width="99.7886%" height="15" fill="rgb(250,229,37)"/><text x="0.2500%" y="367.50">flea`main</text></g><g><title>flea`std::rt::lang_start_internal (944 samples, 99.79%)</title><rect x="0.0000%" y="341" width="99.7886%" height="15" fill="rgb(206,174,23)"/><text x="0.2500%" y="351.50">flea`std::rt::lang_start_internal</text></g><g><title>flea`__rust_maybe_catch_panic (944 samples, 99.79%)</title><rect x="0.0000%" y="325" width="99.7886%" height="15" fill="rgb(211,33,43)"/><text x="0.2500%" y="335.50">flea`__rust_maybe_catch_panic</text></g><g><title>flea`std::panicking::try::do_call (944 samples, 99.79%)</title><rect x="0.0000%" y="309" width="99.7886%" height="15" fill="rgb(245,58,50)"/><text x="0.2500%" y="319.50">flea`std::panicking::try::do_call</text></g><g><title>flea`std::rt::lang_start::_{{closure}} (944 samples, 99.79%)</title><rect x="0.0000%" y="293" width="99.7886%" height="15" fill="rgb(244,68,36)"/><text x="0.2500%" y="303.50">flea`std::rt::lang_start::_{{closure}}</text></g><g><title>flea`flea::main (944 samples, 99.79%)</title><rect x="0.0000%" y="277" width="99.7886%" height="15" fill="rgb(232,229,15)"/><text x="0.2500%" y="287.50">flea`flea::main</text></g><g><title>flea`flea::backend::Backend::call_func (1 samples, 0.11%)</title><rect x="99.6829%" y="261" width="0.1057%" height="15" fill="rgb(254,30,23)"/><text x="99.9329%" y="271.50"></text></g><g><title>0x1094684ac (1 samples, 0.11%)</title><rect x="99.6829%" y="245" width="0.1057%" height="15" fill="rgb(235,160,14)"/><text x="99.9329%" y="255.50"></text></g><g><title>0x7fc87200c112 (1 samples, 0.11%)</title><rect x="99.6829%" y="229" width="0.1057%" height="15" fill="rgb(212,155,44)"/><text x="99.9329%" y="239.50"></text></g><g><title>all (946 samples, 100%)</title><rect x="0.0000%" y="405" width="100.0000%" height="15" fill="rgb(226,2,50)"/><text x="0.2500%" y="415.50"></text></g><g><title>flea`0x1 (946 samples, 100.00%)</title><rect x="0.0000%" y="389" width="100.0000%" height="15" fill="rgb(234,177,6)"/><text x="0.2500%" y="399.50">flea`0x1</text></g><g><title>libdyld.dylib`start (946 samples, 100.00%)</title><rect x="0.0000%" y="373" width="100.0000%" height="15" fill="rgb(217,24,9)"/><text x="0.2500%" y="383.50">libdyld.dylib`start</text></g><g><title>libsystem_kernel.dylib`__exit (2 samples, 0.21%)</title><rect x="99.7886%" y="357" width="0.2114%" height="15" fill="rgb(220,13,46)"/><text x="100.0386%" y="367.50"></text></g></svg></svg>

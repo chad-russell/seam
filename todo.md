@@ -21,7 +21,8 @@
   - [ ] support `.tag` pseudo-property
   - [ ] check enum tag when accessing through a field
 - [x] let binding type inference
-- [ ] generics
+- [x] generics for functions
+- [ ] generics for structs
 - [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
 - [ ] structs as function parameters / return values

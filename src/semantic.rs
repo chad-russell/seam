@@ -128,14 +128,6 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Let { name: _, ty, expr } => {
-                // let coercion = match ty {
-                //     Some(ty) => {
-                //         self.assign_type(*ty, Coercion::None)?;
-                //         Coercion::Id(*ty)
-                //     }
-                //     None => Coercion::None,
-                // };
-
                 if let Some(expr) = expr {
                     self.assign_type(*expr, Coercion::None)?;
                     self.match_types(id, *expr);
@@ -147,21 +139,6 @@ impl<'a> Semantic<'a> {
                 }
 
                 Ok(())
-
-                // match (ty, expr) {
-                //     (Some(ty), _) => {
-                //         self.match_types(id, *ty);
-                //         Ok(())
-                //     }
-                //     (_, Some(expr)) => {
-                //         self.match_types(id, *expr);
-                //         Ok(())
-                //     }
-                //     (None, None) => Err(CompileError::from_string(
-                //         "'let' binding with unbound type and no expression",
-                //         self.parser.ranges[id],
-                //     )),
-                // }
             }
             Node::Set { name, expr, .. } => {
                 let saved_lhs_assign = self.lhs_assign;
@@ -511,9 +488,8 @@ impl<'a> Semantic<'a> {
                 is_indirect: _,
             } => {
                 let resolved_func = self.resolve(*name)?;
-                let func = self.parser.nodes[resolved_func].clone();
 
-                let is_ct = match &func {
+                let is_ct = match &self.parser.nodes[resolved_func] {
                     Node::Func { ct_params, .. } => ct_params.len() > 0,
                     _ => match &self.types[resolved_func] {
                         // if it's a pure function type (already specialized) then it's not ct
@@ -531,7 +507,7 @@ impl<'a> Semantic<'a> {
                 if is_ct {
                     // match given ct_params against declared ct_params
                     let given = ct_params;
-                    let decl = match &func {
+                    let decl = match &self.parser.nodes[resolved_func] {
                         Node::Func { ct_params, .. } => ct_params.clone(),
                         _ => unreachable!(),
                     };
@@ -551,7 +527,7 @@ impl<'a> Semantic<'a> {
                 }
 
                 let given = params;
-                let decl = match func {
+                let decl = match &self.parser.nodes[resolved_func] {
                     Node::Func { params, .. } => params.clone(),
                     _ => match &self.types[resolved_func] {
                         Type::Func { input_tys, .. } => input_tys.clone(),
@@ -689,7 +665,7 @@ impl<'a> Semantic<'a> {
 
         for uid in 0..self.type_matches.len() {
             // println!("\n********* Unifying *********");
-            let ty = self.type_matches[uid]
+            let tys = self.type_matches[uid]
                 .iter()
                 .map(|&ty| {
                     // println!(
@@ -702,11 +678,22 @@ impl<'a> Semantic<'a> {
                 })
                 .filter(|(_, spec)| *spec > 0)
                 .filter(|(ty, _)| self.types[*ty as usize].is_concrete())
-                .max_by(|(_, spec1), (_, spec2)| spec1.cmp(spec2))
-                .map(|(ty, _)| ty);
+                // .max_by(|(_, spec1), (_, spec2)| spec1.cmp(spec2))
+                .map(|(ty, _)| ty)
+                .collect::<Vec<_>>();
+
+            // for &ty in tys.iter() {
+            //     if &self.types[ty] != &self.types[tys[0]] {
+            //         todo!(
+            //             "error message for types not equal: {:?} vs {:?}",
+            //             &self.types[ty],
+            //             &self.types[tys[0]],
+            //         )
+            //     }
+            // }
 
             // set all types to whatever we unified to
-            if let Some(ty) = ty {
+            if let Some(&ty) = tys.first() {
                 match self.types[ty as usize].clone() {
                     Type::Basic(BasicType::IntLiteral) => {
                         self.types[ty as usize] = Type::Basic(BasicType::I64);

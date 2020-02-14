@@ -149,14 +149,29 @@ impl<'a> Backend<'a> {
     pub fn bootstrap_from_source(source: &str) -> Result<Backend, CompileError> {
         FUNC_PTRS.lock().unwrap().clear();
 
+        let now = std::time::Instant::now();
         let mut parser = Parser::new(&source);
         parser.parse()?;
+        let elapsed = now.elapsed();
+        println!(
+            "parser ran in: {}",
+            elapsed.as_micros() as f64 / 1_000_000.0
+        );
 
         let mut semantic = Semantic::new(parser);
         semantic.assign_top_level_types()?;
+        let elapsed = now.elapsed();
+        println!(
+            "parser + semantic ran in: {}",
+            elapsed.as_micros() as f64 / 1_000_000.0
+        );
 
         let mut backend = Backend::new(semantic);
         backend.compile()?;
+        println!(
+            "parser + semantic + backend ran in: {}",
+            elapsed.as_micros() as f64 / 1_000_000.0
+        );
 
         Ok(backend)
     }
