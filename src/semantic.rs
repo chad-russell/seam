@@ -59,11 +59,11 @@ impl<'a> Semantic<'a> {
             );
         }
 
-        for (index, ty) in self.types.iter().enumerate() {
-            if ty == &Type::Unassigned {
-                println!("Unassigned type for {}", self.parser.debug(index));
-            }
-        }
+        // for (index, ty) in self.types.iter().enumerate() {
+        //     if ty == &Type::Unassigned {
+        //         println!("Unassigned type for {}", self.parser.debug(index));
+        //     }
+        // }
 
         Ok(())
     }
@@ -142,6 +142,7 @@ impl<'a> Semantic<'a> {
                 }
 
                 if let Some(ty) = ty {
+                    self.assign_type(*ty, Coercion::None)?;
                     self.match_types(id, *ty);
                 }
 
@@ -649,8 +650,10 @@ impl<'a> Semantic<'a> {
                     self.match_types(*it1, *it2);
                 }
             }
-            (Type::Struct(_), Type::Struct(_)) => {
-                todo!("Implement recursive type-matching for structs")
+            (Type::Struct(st1), Type::Struct(st2)) => {
+                for (ty1, ty2) in st1.iter().zip(st2.iter()) {
+                    self.match_types(*ty1, *ty2);
+                }
             }
             (_, _) => (),
         }
