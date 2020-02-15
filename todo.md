@@ -29,6 +29,7 @@
   - [ ] baking
   - [x] check conflicts during unification
 - [x] (mutually) recursive structs / functions
+- [ ] job queue
 - [ ] compile-time functions -> macros
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] more math

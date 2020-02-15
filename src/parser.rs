@@ -1440,7 +1440,10 @@ impl<'a> Parser<'a> {
         }
 
         self.top_level_map.insert(name, func);
-        self.macros.push(func);
+
+        if is_macro {
+            self.macros.push(func);
+        }
 
         Ok(func)
     }
