@@ -255,75 +255,11 @@ impl<'a> Semantic<'a> {
                 // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
                 self.parser.node_is_addressable[id] = true;
 
-                // todo(chad): @Cleanup this is ugly
-                let (params_map, lit_ty) = match coercion {
-                    Coercion::Id(id) => match &self.types[id] {
-                        Type::Struct { params, .. } => (
-                            Some(
-                                self.parser
-                                    .id_vec(*params)
-                                    .iter()
-                                    .map(|p| {
-                                        let (name, id, index) =
-                                            self.parser.nodes[*p].as_param().unwrap();
-                                        (name, (id, index))
-                                    })
-                                    .collect::<BTreeMap<_, _>>(),
-                            ),
-                            Some(id),
-                        ),
-                        Type::Enum { params, .. } => (
-                            Some(
-                                self.parser
-                                    .id_vec(*params)
-                                    .iter()
-                                    .map(|p| {
-                                        let (name, id, index) =
-                                            self.parser.nodes[*p].as_param().unwrap();
-                                        (name, (id, index))
-                                    })
-                                    .collect::<BTreeMap<_, _>>(),
-                            ),
-                            Some(id),
-                        ),
-                        _ => {
-                            return Err(CompileError::from_string(
-                                "Cannot match struct literal with this type",
-                                self.parser.ranges[id],
-                            ));
-                        }
-                    },
-                    _ => (None, None),
-                };
-
                 for param in self.parser.id_vec(*params).clone() {
-                    let (name, _, _) = self.parser.nodes[param].as_value_param().unwrap();
-
-                    let coercion = match &params_map {
-                        Some(params_map) => {
-                            let (id, param_index) = params_map
-                                .get(&name.expect("todo: handle missing name"))
-                                .expect("todo: handle wrong param");
-
-                            match self.parser.nodes.get_mut(param).unwrap() {
-                                Node::ValueParam { index, .. } => {
-                                    *index = *param_index;
-                                }
-                                _ => unreachable!(),
-                            }
-
-                            Coercion::Id(*id)
-                        }
-                        None => Coercion::None,
-                    };
-
-                    self.assign_type(param, coercion)?;
+                    self.assign_type(param, Coercion::None)?;
                 }
 
-                match lit_ty {
-                    Some(ty_id) => self.match_types(id, ty_id),
-                    None => self.types[id] = Type::Struct { params: params.clone(), copied_from: None },
-                }
+                self.types[id] = Type::Struct { params: params.clone(), copied_from: None };
 
                 Ok(())
             }
@@ -533,22 +469,21 @@ impl<'a> Semantic<'a> {
                     },
                 };
 
-                // let (name, resolved_func) = if is_ct {
-                //     let copied = self.deep_copy_fn(resolved_func);
+                let (name, resolved_func) = if is_ct {
+                    let copied = self.deep_copy_fn(resolved_func);
 
-                //     // todo(chad): @Delete ??
-                //     match self.parser.nodes.get_mut(id).unwrap() {
-                //         Node::Call { name, .. } => {
-                //             *name = copied;
-                //         }
-                //         _ => unreachable!(),
-                //     };
+                    // todo(chad): @Delete ??
+                    match self.parser.nodes.get_mut(id).unwrap() {
+                        Node::Call { name, .. } => {
+                            *name = copied;
+                        }
+                        _ => unreachable!(),
+                    };
 
-                //     (copied, copied)
-                // } else {
-                //     (*name, resolved_func)
-                // };
-                let name = *name;
+                    (copied, copied)
+                } else {
+                    (*name, resolved_func)
+                };
 
                 if is_ct {
                     // match given ct_params against declared ct_params
@@ -731,6 +666,10 @@ impl<'a> Semantic<'a> {
     }
 
     fn match_types(&mut self, ty1: Id, ty2: Id) {
+        if ty1 == 23 || ty2 == 23 {
+            println!("found it");
+        }
+
         if self.types[ty2].is_concrete() && !self.types[ty1].is_concrete() {
             self.types[ty1] = self.types[ty2];
         }
@@ -773,25 +712,13 @@ impl<'a> Semantic<'a> {
             (_, _) => (),
         }
 
-        // if ty1 == 24 && ty2 == 36 {
-        // println!(
-        //     "matching {} ({}) : {:?} with {} ({}) {:?}",
-        //     ty1,
-        //     self.parser.debug(ty1),
-        //     &self.types[ty1],
-        //     ty2,
-        //     self.parser.debug(ty2),
-        //     &self.types[ty2],
-        // );
-        // }
-
         let id1 = self.find_type_array_index(ty1);
         let id2 = self.find_type_array_index(ty2);
 
         match (id1, id2) {
             (None, None) => self.type_matches.push(vec![ty1, ty2]),
             (Some(id), None) => self.type_matches[id].push(ty2),
-            (None, Some(id)) => self.type_matches[id].push(ty2),
+            (None, Some(id)) => self.type_matches[id].push(ty1),
             (Some(id1), Some(id2)) if id1 != id2 => {
                 let lower = id1.min(id2);
                 let upper = id1.max(id2);
@@ -803,6 +730,16 @@ impl<'a> Semantic<'a> {
             }
             (_, _) => (),
         }
+
+        // if id1 != id2 {
+        //     let lower = id1.min(id2);
+        //     let upper = id1.max(id2);
+
+        //     // todo(chad): partition or something
+        //     let upper_matches = self.type_matches[upper].clone();
+        //     self.type_matches[lower].extend(upper_matches);
+        //     self.type_matches.remove(upper);
+        // }
     }
 
     fn get_poly_copy(&self, id: Id) -> Option<Id> {
