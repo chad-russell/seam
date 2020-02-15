@@ -21,8 +21,14 @@
   - [ ] support `.tag` pseudo-property
   - [ ] check enum tag when accessing through a field
 - [x] let binding type inference
-- [x] generics for functions
-- [ ] generics for structs
+- [ ] generics
+  - [x] for functions
+  - [x] for structs
+  - [x] copy functions/structs when instantiating so we can do multiple
+  - [ ] baking
+  - [ ] check conflicts during unification
+- [ ] (mutually) recursive structs / functions
+- [ ] more math
 - [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
 - [ ] structs as function parameters / return values
@@ -30,4 +36,3 @@
 - [ ] arrays
 - [ ] while
 - [ ] f32/f64
-- [ ] more math

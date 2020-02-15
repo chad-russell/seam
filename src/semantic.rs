@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, Location, Node, Parser, Type};
 
 type Sym = usize;
 
@@ -350,12 +350,13 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Func {
-                name: _,   //: Sym,
-                scope: _,  //: Id,
-                ct_params, //: Vec<Id>,
-                params,    //: Vec<Id>,
-                return_ty, //: Id,
-                stmts,     //: Vec<Id>,
+                name: _,        // Sym,
+                scope: _,       // Id,
+                ct_params,      // Vec<Id>,
+                params,         // Vec<Id>,
+                return_ty,      // Id,
+                stmts,          // Vec<Id>,
+                is_specialized, // bool,
             } => {
                 for &ct_param in ct_params.iter() {
                     self.assign_type(ct_param, Coercion::None)?;
@@ -377,12 +378,16 @@ impl<'a> Semantic<'a> {
                     self.assign_type(stmt, Coercion::None)?;
                 }
 
+                self.topo.push(id);
+
                 self.types[id] = Type::Func {
                     return_ty: *return_ty,
                     input_tys: params.clone(),
                 };
 
-                self.topo.push(id);
+                // if ct_params.is_empty() {
+                //     self.topo.push(id);
+                // }
 
                 Ok(())
             }
@@ -517,6 +522,23 @@ impl<'a> Semantic<'a> {
                     },
                 };
 
+                let (name, resolved_func) = if is_ct {
+                    let copied = self.deep_copy_fn(resolved_func);
+                    // self.topo.push(copied);
+
+                    // todo(chad): @Delete ??
+                    match self.parser.nodes.get_mut(id).unwrap() {
+                        Node::Call { name, .. } => {
+                            *name = copied;
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    (copied, copied)
+                } else {
+                    (*name, resolved_func)
+                };
+
                 if is_ct {
                     // match given ct_params against declared ct_params
                     let given = ct_params;
@@ -547,17 +569,38 @@ impl<'a> Semantic<'a> {
                     self.match_types(*d, *g);
                 }
 
-                self.assign_type(*name, Coercion::None)?;
+                self.assign_type(name, Coercion::None)?;
 
-                match self.types[*name].clone() {
+                self.types[id] = Type::Type;
+
+                match self.types[name].clone() {
                     Type::Func { return_ty, .. } => self.match_types(id, return_ty),
                     _ => (),
                 }
 
                 Ok(())
             }
-            Node::Struct { params, .. } => {
-                for param in params {
+            Node::Struct {
+                ct_params, params, ..
+            } => {
+                let (ct_params, params, id) = if !ct_params.is_empty() {
+                    let copied = self.deep_copy_struct(id);
+                    self.parser.nodes[id] = self.parser.nodes[copied].clone();
+
+                    match &self.parser.nodes[id] {
+                        Node::Struct {
+                            ct_params, params, ..
+                        } => (ct_params.clone(), params.clone(), copied),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    (ct_params.clone(), params.clone(), id)
+                };
+
+                for param in ct_params.iter() {
+                    self.assign_type(*param, Coercion::None)?;
+                }
+                for param in params.iter() {
                     self.assign_type(*param, Coercion::None)?;
                 }
                 self.types[id] = Type::Struct(params.clone());
@@ -580,6 +623,70 @@ impl<'a> Semantic<'a> {
                 self.parser.ranges[id],
             )),
         }
+    }
+
+    fn deep_copy_fn(&mut self, id: Id) -> Id {
+        println!("copying function!");
+
+        let range = self.parser.ranges[id];
+        let source =
+            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+
+        self.parser
+            .lexer
+            .update_source_for_copy(source, range.start);
+        self.parser.copying = true;
+
+        let copied = self.parser.parse_fn(range.start).unwrap();
+
+        // Replace the name so we don't get collisions (simply append the copied node id since that's always unique)
+        let old_name = match &self.parser.nodes[id] {
+            Node::Func { name, .. } => self.parser.resolve_sym_unchecked(*name).to_string(),
+            _ => unreachable!(),
+        };
+        let new_name = self
+            .parser
+            .lexer
+            .string_interner
+            .get_or_intern(format!("{}_{}", old_name, copied));
+        match self.parser.nodes.get_mut(copied).unwrap() {
+            Node::Func {
+                name,
+                is_specialized,
+                ..
+            } => {
+                *name = new_name;
+                *is_specialized = true;
+            }
+            _ => unreachable!(),
+        };
+
+        while self.types.len() < self.parser.nodes.len() {
+            self.types.push(Type::Unassigned);
+        }
+
+        copied
+    }
+
+    fn deep_copy_struct(&mut self, id: Id) -> Id {
+        println!("copying struct!");
+
+        let range = self.parser.ranges[id];
+        let source =
+            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+
+        self.parser
+            .lexer
+            .update_source_for_copy(source, range.start);
+        self.parser.copying = true;
+
+        let copied = self.parser.parse_struct(range.start).unwrap();
+
+        while self.types.len() < self.parser.nodes.len() {
+            self.types.push(Type::Unassigned);
+        }
+
+        copied
     }
 
     fn resolve(&self, id: Id) -> Result<Id, CompileError> {

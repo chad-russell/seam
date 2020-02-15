@@ -8,9 +8,9 @@ type Sym = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
-    line: usize,
-    col: usize,
-    char_offset: usize,
+    pub line: usize,
+    pub col: usize,
+    pub char_offset: usize,
 }
 
 impl Default for Location {
@@ -25,8 +25,8 @@ impl Default for Location {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Range {
-    start: Location,
-    end: Location,
+    pub start: Location,
+    pub end: Location,
 }
 
 impl Range {
@@ -203,6 +203,16 @@ impl<'a> Lexer<'a> {
         self.pop();
     }
 
+    pub fn update_source_for_copy(&mut self, source: &'a str, loc: Location) {
+        self.source = source;
+        self.loc = loc;
+        self.top = Lexeme::new(Token::EOF, Default::default());
+        self.second = Lexeme::new(Token::EOF, Default::default());
+
+        self.pop();
+        self.pop();
+    }
+
     #[inline]
     fn eat(&mut self, chars: usize) {
         self.source = &self.source[chars..];
@@ -226,7 +236,10 @@ impl<'a> Lexer<'a> {
             .position(|c| c == '\n')
             .unwrap_or(self.source.len());
         self.eat(chars);
-        self.newline();
+
+        if self.source.len() > 0 {
+            self.newline();
+        }
     }
 
     #[inline]
@@ -256,12 +269,12 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn resolve_unchecked(&self, sym: Sym) -> &str {
+    pub fn resolve_unchecked(&self, sym: Sym) -> &str {
         self.string_interner.deref().resolve(sym).unwrap()
     }
 
     fn prefix(&mut self, pat: &str, tok: Token) -> bool {
-        if self.source.len() >= pat.len() + 1 && self.source.starts_with(pat) {
+        if self.source.len() >= pat.len() && self.source.starts_with(pat) {
             let start = self.loc;
             self.eat(pat.len());
             self.second = Lexeme::new(tok, Range::new(start, self.loc));
@@ -448,12 +461,16 @@ impl<'a> Lexer<'a> {
                     None => self.source.len(),
                 };
 
-                let sym = self.string_interner.get_or_intern(&self.source[..index]);
-                self.eat(index);
+                if index == 0 {
+                    Lexeme::new(Token::EOF, Default::default())
+                } else {
+                    let sym = self.string_interner.get_or_intern(&self.source[..index]);
+                    self.eat(index);
 
-                let end = self.loc;
+                    let end = self.loc;
 
-                Lexeme::new(Token::Symbol(sym), Range::new(start, end))
+                    Lexeme::new(Token::Symbol(sym), Range::new(start, end))
+                }
             }
             None => Lexeme::new(Token::EOF, Default::default()),
         };
@@ -489,6 +506,8 @@ pub struct Parser<'a> {
 
     pub scopes: Vec<Scope>,
     top_scope: Id,
+
+    pub copying: bool,
 
     // todo(chad): represent list of locals per function
     pub top_level: Vec<Id>,
@@ -578,6 +597,7 @@ pub enum Node {
         params: Vec<Id>,
         return_ty: Id,
         stmts: Vec<Id>,
+        is_specialized: bool,
     },
     DeclParam {
         name: Sym,
@@ -705,6 +725,7 @@ impl<'a> Parser<'a> {
             node_is_addressable: Default::default(),
             scopes: scopes,
             top_scope: 0,
+            copying: false,
             top_level: Default::default(),
             top_level_map: Default::default(),
             sym_let,
@@ -901,6 +922,12 @@ impl<'a> Parser<'a> {
                     Ok(self.push_node(range, Node::TypeLiteral(BasicType::Bool.into())))
                 } else if sym == self.sym_string {
                     Ok(self.push_node(range, Node::TypeLiteral(Type::String)))
+                } else if self.lexer.top.tok == Token::Bang {
+                    // self.lexer.pop();
+                    // self.expect(&Token::LParen);
+                    // let ct_params = self.parse_value_params();
+                    // self.expect(&Token::RParen);
+                    todo!("parse polymorph type");
                 } else {
                     Ok(ident)
                 }
@@ -1302,7 +1329,7 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    fn parse_fn(&mut self, start: Location) -> Result<Id, CompileError> {
+    pub fn parse_fn(&mut self, start: Location) -> Result<Id, CompileError> {
         self.expect(&Token::Fn)?;
 
         let name = self.parse_sym()?;
@@ -1334,7 +1361,8 @@ impl<'a> Parser<'a> {
 
         let mut stmts = Vec::new();
         while self.lexer.top.tok != Token::RCurly {
-            stmts.push(self.parse_fn_stmt()?);
+            let stmt = self.parse_fn_stmt()?;
+            stmts.push(stmt);
         }
 
         let range = self.expect_range(start, Token::RCurly)?;
@@ -1348,6 +1376,7 @@ impl<'a> Parser<'a> {
                 params,
                 return_ty,
                 stmts,
+                is_specialized: false,
             },
         );
 
@@ -1355,46 +1384,20 @@ impl<'a> Parser<'a> {
         // TODO: should probably do this in a 'defer', so that the scope is also popped in the event of an error
         self.top_scope = old_top_scope;
 
-        self.scope_insert(name, func);
+        if !self.copying {
+            self.scope_insert(name, func);
+        }
+
         self.top_level_map.insert(name, func);
 
         Ok(func)
     }
 
-    fn parse_top_level(&mut self) -> Result<Id, CompileError> {
+    pub fn parse_top_level(&mut self) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
-            Token::Struct => {
-                self.lexer.pop();
-                let name = self.parse_sym()?;
-
-                let ct_params = if self.lexer.top.tok == Token::Bang {
-                    self.lexer.pop();
-                    self.expect(&Token::LParen)?;
-                    let params = self.parse_params()?;
-                    self.expect(&Token::RParen)?;
-                    params
-                } else {
-                    Vec::new()
-                };
-
-                self.expect(&Token::LCurly)?;
-                let params = self.parse_params()?;
-                let range = self.expect_range(start, Token::RCurly)?;
-
-                let id = self.push_node(
-                    range,
-                    Node::Struct {
-                        name,
-                        ct_params,
-                        params,
-                    },
-                );
-                self.scope_insert(name, id);
-
-                Ok(id)
-            }
+            Token::Struct => self.parse_struct(start),
             Token::Enum => {
                 self.lexer.pop();
                 let name = self.parse_sym()?;
@@ -1404,7 +1407,10 @@ impl<'a> Parser<'a> {
                 let range = self.expect_range(start, Token::RCurly)?;
 
                 let id = self.push_node(range, Node::Enum { name, params });
-                self.scope_insert(name, id);
+
+                if !self.copying {
+                    self.scope_insert(name, id);
+                }
 
                 Ok(id)
             }
@@ -1414,6 +1420,40 @@ impl<'a> Parser<'a> {
                 self.lexer.top.range,
             )),
         }
+    }
+
+    pub fn parse_struct(&mut self, start: Location) -> Result<Id, CompileError> {
+        self.lexer.pop();
+        let name = self.parse_sym()?;
+
+        let ct_params = if self.lexer.top.tok == Token::Bang {
+            self.lexer.pop();
+            self.expect(&Token::LParen)?;
+            let params = self.parse_params()?;
+            self.expect(&Token::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+
+        self.expect(&Token::LCurly)?;
+        let params = self.parse_params()?;
+        let range = self.expect_range(start, Token::RCurly)?;
+
+        let id = self.push_node(
+            range,
+            Node::Struct {
+                name,
+                ct_params,
+                params,
+            },
+        );
+
+        if !self.copying {
+            self.scope_insert(name, id);
+        }
+
+        Ok(id)
     }
 
     // pub fn debug_sym(&self, sym: Sym) -> String {

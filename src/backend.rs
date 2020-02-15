@@ -222,6 +222,12 @@ impl<'a> Backend<'a> {
     }
 
     pub fn call_func(&self, str: &str) -> i32 {
+        // dbg!(FUNC_PTRS
+        //     .lock()
+        //     .unwrap()
+        //     .keys()
+        //     .map(|k| self.semantic.parser.lexer.resolve_unchecked(*k))
+        //     .collect::<Vec<_>>());
         let f: fn() -> i32 = unsafe {
             std::mem::transmute::<_, fn() -> i32>(
                 (FUNC_PTRS.lock().unwrap())
@@ -280,7 +286,7 @@ impl<'a> Backend<'a> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(*name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                // println!("compiling func {}", func_name);
+                println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
