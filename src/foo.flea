@@ -73,7 +73,8 @@ fn get_y(p: *Point) i64 {
 
 fn poly_get_y!(T: Type)(p: *T) i64 {
     let hack_p = p;
-    return hack_p.y;
+    let p2 = ^hack_p;
+    return p2.y;
 }
 
 fn id(n: i64) i64 {

@@ -666,9 +666,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn match_types(&mut self, ty1: Id, ty2: Id) {
-        if ty1 == 23 || ty2 == 23 {
-            println!("found it");
-        }
+        if ty1 == ty2 { return; }
 
         if self.types[ty2].is_concrete() && !self.types[ty1].is_concrete() {
             self.types[ty1] = self.types[ty2];
@@ -730,16 +728,6 @@ impl<'a> Semantic<'a> {
             }
             (_, _) => (),
         }
-
-        // if id1 != id2 {
-        //     let lower = id1.min(id2);
-        //     let upper = id1.max(id2);
-
-        //     // todo(chad): partition or something
-        //     let upper_matches = self.type_matches[upper].clone();
-        //     self.type_matches[lower].extend(upper_matches);
-        //     self.type_matches.remove(upper);
-        // }
     }
 
     fn get_poly_copy(&self, id: Id) -> Option<Id> {
@@ -758,17 +746,17 @@ impl<'a> Semantic<'a> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
-            println!("\n********* Unifying *********");
+            // println!("\n********* Unifying *********");
             let tys = self.type_matches[uid]
                 .iter()
                 .map(|&ty| {
-                    println!(
-                        "{:?} ({}) : {:?}",
-                        // &self.parser.nodes[ty],
-                        ty,
-                        self.parser.debug(ty),
-                        &self.types[ty],
-                    );
+                    // println!(
+                    //     "{:?} ({}) : {:?}",
+                    //     // &self.parser.nodes[ty],
+                    //     ty,
+                    //     self.parser.debug(ty),
+                    //     &self.types[ty],
+                    // );
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
@@ -794,11 +782,11 @@ impl<'a> Semantic<'a> {
                     }
                     _ => (),
                 }
-                println!(
-                    "setting all to {:?} (from {:?})",
-                    self.types[ty as usize],
-                    self.parser.debug(ty as _)
-                );
+                // println!(
+                //     "setting all to {:?} (from {:?})",
+                //     self.types[ty as usize],
+                //     self.parser.debug(ty as _)
+                // );
 
                 for id in self.type_matches[uid].iter() {
                     self.types[*id] = self.types[ty as usize].clone();

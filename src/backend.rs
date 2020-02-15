@@ -283,7 +283,7 @@ impl<'a> Backend<'a> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(*name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                println!("compiling func {}", func_name);
+                // println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
