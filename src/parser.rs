@@ -127,6 +127,7 @@ enum Token {
     Struct,
     Enum,
     Fn,
+    Macro,
     True,
     False,
     I8,
@@ -350,6 +351,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("fn", Token::Fn) {
             return;
         }
+        if self.prefix_keyword("macro", Token::Macro) {
+            return;
+        }
         if self.prefix_keyword("i8", Token::I8) {
             return;
         }
@@ -530,6 +534,7 @@ pub struct Parser<'a> {
 
     // todo(chad): represent list of locals per function
     pub top_level: Vec<Id>,
+    pub macros: Vec<Id>,
     pub top_level_map: BTreeMap<Sym, Id>,
 
     sym_let: Sym,
@@ -746,6 +751,7 @@ impl<'a> Parser<'a> {
             top_scope: 0,
             copying: false,
             top_level: Default::default(),
+            macros: Default::default(),
             top_level_map: Default::default(),
             id_vecs: Default::default(),
             sym_let,
@@ -1368,7 +1374,14 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_fn(&mut self, start: Location) -> Result<Id, CompileError> {
-        self.expect(&Token::Fn)?;
+        let is_macro = if self.lexer.top.tok == Token::Fn {
+            false
+        } else if self.lexer.top.tok == Token::Macro {
+            true
+        } else {
+            unreachable!()
+        };
+        self.lexer.pop();
 
         let name = self.parse_sym()?;
 
@@ -1427,6 +1440,7 @@ impl<'a> Parser<'a> {
         }
 
         self.top_level_map.insert(name, func);
+        self.macros.push(func);
 
         Ok(func)
     }
@@ -1452,7 +1466,7 @@ impl<'a> Parser<'a> {
 
                 Ok(id)
             }
-            Token::Fn => self.parse_fn(start),
+            Token::Fn | Token::Macro => self.parse_fn(start),
             _ => Err(CompileError::from_string(
                 "Unexpected top level",
                 self.lexer.top.range,

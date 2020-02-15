@@ -38,15 +38,19 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
-        for tl in self.parser.top_level.clone().iter() {
-            let is_poly = match &self.parser.nodes[*tl] {
+        for mac in self.parser.macros.clone() {
+            todo!("macros");
+        }
+
+        for tl in self.parser.top_level.clone() {
+            let is_poly = match &self.parser.nodes[tl] {
                 Node::Func { ct_params, .. } => ct_params.is_some(),
                 Node::Struct { ct_params, .. } => ct_params.is_some(),
                 _ => false,
             };
 
             if !is_poly {
-                self.assign_type(*tl, Coercion::None)?
+                self.assign_type(tl, Coercion::None)?
             }
         }
 
