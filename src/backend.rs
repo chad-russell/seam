@@ -1,10 +1,7 @@
 use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 use crate::semantic::Semantic;
 
-use cranelift::codegen::ir::{
-    FuncRef, MemFlags, Signature, StackSlot, StackSlotData, StackSlotKind,
-};
-use cranelift::codegen::settings::{self, Configurable};
+use cranelift::codegen::ir::{FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind};
 use cranelift::prelude::{
     types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
@@ -124,27 +121,27 @@ impl<'a> Backend<'a> {
         }
     }
 
-    pub fn update_source(&mut self, source: &'a str) -> Result<(), CompileError> {
-        self.semantic.parser.top_level.clear();
-        self.semantic.parser.top_level_map.clear();
-        self.semantic.parser.nodes.clear();
-        self.semantic.parser.node_scopes.clear();
-        self.semantic.parser.ranges.clear();
-        self.semantic.parser.scopes.clear();
+    // pub fn update_source(&mut self, source: &'a str) -> Result<(), CompileError> {
+    //     self.semantic.parser.top_level.clear();
+    //     self.semantic.parser.top_level_map.clear();
+    //     self.semantic.parser.nodes.clear();
+    //     self.semantic.parser.node_scopes.clear();
+    //     self.semantic.parser.ranges.clear();
+    //     self.semantic.parser.scopes.clear();
 
-        self.semantic.parser.lexer.update_source(source);
+    //     self.semantic.parser.lexer.update_source(source);
 
-        self.semantic.parser.parse()?;
+    //     self.semantic.parser.parse()?;
 
-        self.semantic.topo.clear();
-        self.semantic.types.clear();
-        while self.semantic.types.len() < self.semantic.parser.nodes.len() {
-            self.semantic.types.push(Type::Unassigned);
-        }
-        self.semantic.assign_top_level_types()?;
+    //     self.semantic.topo.clear();
+    //     self.semantic.types.clear();
+    //     while self.semantic.types.len() < self.semantic.parser.nodes.len() {
+    //         self.semantic.types.push(Type::Unassigned);
+    //     }
+    //     self.semantic.assign_top_level_types()?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub fn bootstrap_from_source(source: &str) -> Result<Backend, CompileError> {
         FUNC_PTRS.lock().unwrap().clear();
@@ -176,31 +173,31 @@ impl<'a> Backend<'a> {
         Ok(backend)
     }
 
-    pub fn recompile_function(&mut self, function: impl Into<String>) -> Result<(), CompileError> {
-        self.values.clear();
-        while self.values.len() < self.semantic.parser.nodes.len() {
-            self.values.push(Value::Unassigned);
-        }
+    // pub fn recompile_function(&mut self, function: impl Into<String>) -> Result<(), CompileError> {
+    //     self.values.clear();
+    //     while self.values.len() < self.semantic.parser.nodes.len() {
+    //         self.values.push(Value::Unassigned);
+    //     }
 
-        // Replace all top-level function values with FuncRefs
-        let new_id = self.semantic.parser.get_top_level(function).unwrap();
-        for topo in self.semantic.topo.clone() {
-            if topo == new_id {
-                continue;
-            }
+    //     // Replace all top-level function values with FuncRefs
+    //     let new_id = self.semantic.parser.get_top_level(function).unwrap();
+    //     for topo in self.semantic.topo.clone() {
+    //         if topo == new_id {
+    //             continue;
+    //         }
 
-            match self.semantic.parser.nodes[topo] {
-                Node::Func { name, .. } => {
-                    self.values[topo] = Value::FuncRef(name);
-                }
-                _ => {}
-            };
-        }
+    //         match self.semantic.parser.nodes[topo] {
+    //             Node::Func { name, .. } => {
+    //                 self.values[topo] = Value::FuncRef(name);
+    //             }
+    //             _ => {}
+    //         };
+    //     }
 
-        self.compile_id(new_id)?;
+    //     self.compile_id(new_id)?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub fn resolve_symbol(&self, sym: Sym) -> String {
         self.semantic
@@ -409,14 +406,14 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Type::Basic(BasicType::F64) => 8,
             Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
             Type::Func { .. } => self.module.isa().pointer_bytes() as _,
-            Type::Struct(params) => self
+            Type::Struct { params, .. } => self
                 .semantic
                 .parser
                 .id_vec(*params)
                 .iter()
                 .map(|p| self.type_size(*p))
                 .sum(),
-            Type::Enum(params) => {
+            Type::Enum { params, .. } => {
                 let biggest_param = self
                     .semantic
                     .parser
@@ -511,8 +508,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         if rvalue_is_ptr {
             let ty = &self.semantic.types[id];
             let ty = match ty {
-                Type::Struct(_) => self.module.isa().pointer_type(),
-                Type::Enum(_) => self.module.isa().pointer_type(),
+                Type::Struct { .. } => self.module.isa().pointer_type(),
+                Type::Enum { .. } => self.module.isa().pointer_type(),
                 _ => ty.try_into().unwrap(),
             };
 
@@ -591,7 +588,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::StructLiteral { name: _, params } => {
                 // if this typechecked as an enum, handle things a bit differently
                 match &self.semantic.types[id] {
-                    Type::Enum(_) => {
+                    Type::Enum { .. } => {
                         let params = self.semantic.parser.id_vec(*params);
 
                         assert_eq!(params.len(), 1);
@@ -667,18 +664,18 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
-            Node::Add(lhs, rhs) => {
-                self.compile_id(*lhs)?;
-                self.compile_id(*rhs)?;
+            // Node::Add(lhs, rhs) => {
+            //     self.compile_id(*lhs)?;
+            //     self.compile_id(*rhs)?;
 
-                let lhs = self.rvalue(*lhs);
-                let rhs = self.rvalue(*rhs);
+            //     let lhs = self.rvalue(*lhs);
+            //     let rhs = self.rvalue(*rhs);
 
-                let value = self.builder.ins().iadd(lhs, rhs);
-                self.set_value(id, value);
+            //     let value = self.builder.ins().iadd(lhs, rhs);
+            //     self.set_value(id, value);
 
-                Ok(())
-            }
+            //     Ok(())
+            // }
             Node::Let {
                 name: _, // Sym
                 ty: _,   // Id
@@ -895,7 +892,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 let ty = &self.semantic.types[id];
                 let ty = match ty {
-                    Type::Struct(_) => self.module.isa().pointer_type(),
+                    Type::Struct { .. } => self.module.isa().pointer_type(),
                     _ => ty.try_into().unwrap(),
                 };
 
@@ -939,7 +936,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 // all field accesses on enums have the same offset -- just the tag size in bytes
                 let is_enum = match &self.semantic.types[unpointered_ty] {
-                    Type::Enum(_) => true,
+                    Type::Enum { .. } => true,
                     _ => false,
                 };
 
