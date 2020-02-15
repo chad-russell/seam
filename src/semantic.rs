@@ -50,7 +50,7 @@ impl<'a> Semantic<'a> {
             }
         }
 
-        self.unify_types();
+        self.unify_types()?;
         if !self.type_matches.is_empty() && !self.type_matches[0].is_empty() {
             CompileError::from_string(
                 "Failed to unify types",
@@ -81,14 +81,13 @@ impl<'a> Semantic<'a> {
             _ => false,
         };
 
-        if type_is_assigned && !is_poly { return Ok(()); }
+        if type_is_assigned && !is_poly {
+            return Ok(());
+        }
 
-        // todo(chad): clone
-        let node = &self.parser.nodes[id].clone();
-
-        match node {
+        match self.parser.nodes[id] {
             Node::Symbol(sym) => {
-                let resolved = self.scope_get(*sym, id)?;
+                let resolved = self.scope_get(sym, id)?;
                 self.assign_type(resolved, coercion)?;
                 self.match_types(id, resolved);
                 self.parser.node_is_addressable[id] = self.parser.node_is_addressable[resolved];
@@ -137,17 +136,17 @@ impl<'a> Semantic<'a> {
             }
             Node::Let { name: _, ty, expr } => {
                 if let Some(expr) = expr {
-                    self.assign_type(*expr, Coercion::None)?;
-                    self.match_types(id, *expr);
+                    self.assign_type(expr, Coercion::None)?;
+                    self.match_types(id, expr);
                 }
 
                 if let Some(ty) = ty {
-                    self.assign_type(*ty, Coercion::None)?;
+                    self.assign_type(ty, Coercion::None)?;
 
-                    if let Some(poly_copy) = self.get_poly_copy(*ty) {
+                    if let Some(poly_copy) = self.get_poly_copy(ty) {
                         self.match_types(id, poly_copy);
                     } else {
-                        self.match_types(id, *ty);
+                        self.match_types(id, ty);
                     }
                 }
 
@@ -156,16 +155,16 @@ impl<'a> Semantic<'a> {
             Node::Set { name, expr, .. } => {
                 let saved_lhs_assign = self.lhs_assign;
                 self.lhs_assign = true;
-                self.assign_type(*name, Coercion::None)?;
+                self.assign_type(name, Coercion::None)?;
                 self.lhs_assign = saved_lhs_assign;
 
-                self.assign_type(*expr, Coercion::None)?;
+                self.assign_type(expr, Coercion::None)?;
 
-                self.match_types(id, *expr);
-                self.match_types(*name, *expr);
+                self.match_types(id, expr);
+                self.match_types(name, expr);
 
                 // if name is a load, then we are doing a store
-                let is_load = match &self.parser.nodes[*name] {
+                let is_load = match &self.parser.nodes[name] {
                     Node::Load(_) => true,
                     _ => false,
                 };
@@ -185,13 +184,13 @@ impl<'a> Semantic<'a> {
                 field_index: _,
                 ..
             } => {
-                self.assign_type(*base, Coercion::None)?;
-                self.parser.node_is_addressable[*base] = true;
+                self.assign_type(base, Coercion::None)?;
+                self.parser.node_is_addressable[base] = true;
 
                 // todo(chad): deref more than once?
-                let unpointered_ty = match &self.types[*base] {
+                let unpointered_ty = match &self.types[base] {
                     Type::Pointer(id) => *id,
-                    _ => *base,
+                    _ => base,
                 };
 
                 if self.lhs_assign {
@@ -210,7 +209,7 @@ impl<'a> Semantic<'a> {
                             self.parser.debug(unpointered_ty),
                             unpointered_ty,
                         ),
-                        self.parser.ranges[*base],
+                        self.parser.ranges[base],
                     ),
                 )?;
                 let params = &self
@@ -234,7 +233,7 @@ impl<'a> Semantic<'a> {
                     })
                     .collect::<BTreeMap<_, _>>();
 
-                match params.get(field_name) {
+                match params.get(&field_name) {
                     Some((ty, index)) => {
                         // set the field index
                         match &mut self.parser.nodes[id] {
@@ -255,7 +254,7 @@ impl<'a> Semantic<'a> {
                 // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
                 self.parser.node_is_addressable[id] = true;
 
-                for param in self.parser.id_vec(*params).clone() {
+                for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param, Coercion::None)?;
                 }
 
@@ -304,36 +303,36 @@ impl<'a> Semantic<'a> {
                 return_ty, // Id,
                 stmts,     // Vec<Id>,
             } => {
-                if let Some(ct_params) = *ct_params {
+                if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
                         self.assign_type(ct_param, Coercion::None)?;
                     }
                 }
 
-                self.assign_type(*return_ty, Coercion::None)?;
+                self.assign_type(return_ty, Coercion::None)?;
 
                 let function_return_tys = self.function_return_tys.clone();
-                function_return_tys.borrow_mut().push(*return_ty);
+                function_return_tys.borrow_mut().push(return_ty);
                 defer! {{
                     function_return_tys.borrow_mut().pop();
                 }};
 
-                for param in self.parser.id_vec(*params).clone() {
+                for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param, Coercion::None)?;
                 }
 
-                for stmt in self.parser.id_vec(*stmts).clone() {
-                    self.assign_type(stmt, Coercion::None)?;
-                    self.unify_types();
-                }
-
-                self.topo.push(id);
-
                 self.types[id] = Type::Func {
-                    return_ty: *return_ty,
+                    return_ty: return_ty,
                     input_tys: params.clone(),
                     copied_from: None,
                 };
+
+                for stmt in self.parser.id_vec(stmts).clone() {
+                    self.assign_type(stmt, Coercion::None)?;
+                    self.unify_types()?;
+                }
+
+                self.topo.push(id);
 
                 Ok(())
             }
@@ -342,19 +341,19 @@ impl<'a> Semantic<'a> {
                 ty,       // Id
                 index: _, //  u16
             } => {
-                self.assign_type(*ty, Coercion::None)?;
-                self.match_types(id, *ty);
+                self.assign_type(ty, Coercion::None)?;
+                self.match_types(id, ty);
                 Ok(())
             }
             Node::ValueParam { name: _, value, .. } => {
-                self.assign_type(*value, coercion)?;
-                self.match_types(id, *value);
+                self.assign_type(value, coercion)?;
+                self.match_types(id, value);
                 Ok(())
             }
             Node::Return(ret_id) => {
                 let return_ty = *self.function_return_tys.borrow().last().unwrap();
-                self.assign_type(*ret_id, Coercion::Id(return_ty))?;
-                self.match_types(id, *ret_id);
+                self.assign_type(ret_id, Coercion::Id(return_ty))?;
+                self.match_types(id, ret_id);
                 Ok(())
             }
             // Node::If { cond_id, true_id, false_id } => {
@@ -380,16 +379,16 @@ impl<'a> Semantic<'a> {
             // }
             Node::Ref(ref_id) => {
                 // todo(chad): coercion
-                self.assign_type(*ref_id, Coercion::None)?;
-                self.types[id] = Type::Pointer(*ref_id);
+                self.assign_type(ref_id, Coercion::None)?;
+                self.types[id] = Type::Pointer(ref_id);
 
                 Ok(())
             }
             Node::Load(load_id) => {
                 // todo(chad): coercion
-                self.assign_type(*load_id, Coercion::None)?;
+                self.assign_type(load_id, Coercion::None)?;
 
-                match self.types[*load_id] {
+                match self.types[load_id] {
                     Type::Pointer(pid) => {
                         self.match_types(id, pid);
                         Ok(())
@@ -406,8 +405,8 @@ impl<'a> Semantic<'a> {
                         self.types[id] = ty.clone();
                     }
                     Type::Pointer(ty) => {
-                        self.assign_type(*ty, Coercion::None)?;
-                        self.types[id] = Type::Pointer(*ty);
+                        self.assign_type(ty, Coercion::None)?;
+                        self.types[id] = Type::Pointer(ty);
                     }
                     Type::String => {
                         self.types[id] = Type::String;
@@ -420,22 +419,22 @@ impl<'a> Semantic<'a> {
                         input_tys,
                         ..
                     } => {
-                        self.assign_type(*return_ty, Coercion::None)?;
-                        for input_ty in self.parser.id_vec(*input_tys).clone() {
+                        self.assign_type(return_ty, Coercion::None)?;
+                        for input_ty in self.parser.id_vec(input_tys).clone() {
                             self.assign_type(input_ty, Coercion::None)?;
                         }
 
                         self.types[id] = ty.clone();
                     }
                     Type::Struct { params, .. } => {
-                        for ty in self.parser.id_vec(*params).clone() {
+                        for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty, Coercion::None)?;
                         }
 
                         self.types[id] = ty.clone();
                     }
                     Type::Enum { params, .. } => {
-                        for ty in self.parser.id_vec(*params).clone() {
+                        for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty, Coercion::None)?;
                         }
 
@@ -452,7 +451,7 @@ impl<'a> Semantic<'a> {
                 params,
                 is_indirect: _,
             } => {
-                let resolved_func = self.resolve(*name)?;
+                let resolved_func = self.resolve(name)?;
 
                 let is_ct = match &self.parser.nodes[resolved_func] {
                     Node::Func { ct_params, .. } => ct_params.is_some(),
@@ -482,7 +481,7 @@ impl<'a> Semantic<'a> {
 
                     (copied, copied)
                 } else {
-                    (*name, resolved_func)
+                    (name, resolved_func)
                 };
 
                 if is_ct {
@@ -505,7 +504,7 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
-                let given = self.parser.id_vec(*params).clone();
+                let given = self.parser.id_vec(params).clone();
                 let decl = match &self.parser.nodes[resolved_func] {
                     Node::Func { params, .. } => params,
                     _ => match &self.types[resolved_func] {
@@ -539,6 +538,9 @@ impl<'a> Semantic<'a> {
             Node::Struct {
                 ct_params, params, ..
             } => {
+                // for recursion purposes, give the struct a placeholder type before anything else
+                self.types[id] = Type::Type;
+
                 let (ct_params, params, copied) = if ct_params.is_some() {
                     let copied = self.deep_copy_struct(id);
 
@@ -549,7 +551,7 @@ impl<'a> Semantic<'a> {
                         _ => unreachable!(),
                     }
                 } else {
-                    (*ct_params, *params, None)
+                    (ct_params, params, None)
                 };
 
                 if let Some(ct_params) = ct_params {
@@ -565,7 +567,7 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Enum { name: _, params } => {
-                for param in self.parser.id_vec(*params).clone() {
+                for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param, Coercion::None)?;
                 }
                 self.types[id] = Type::Enum { params: params.clone(), copied_from: None, }; 
@@ -666,7 +668,9 @@ impl<'a> Semantic<'a> {
     }
 
     fn match_types(&mut self, ty1: Id, ty2: Id) {
-        if ty1 == ty2 { return; }
+        if ty1 == ty2 {
+            return;
+        }
 
         if self.types[ty2].is_concrete() && !self.types[ty1].is_concrete() {
             self.types[ty1] = self.types[ty2];
@@ -696,7 +700,7 @@ impl<'a> Semantic<'a> {
                     self.match_types(*it1, *it2);
                 }
             }
-            (Type::Struct { params: st1, .. } , Type::Struct { params: st2, .. }) => {
+            (Type::Struct { params: st1, .. }, Type::Struct { params: st2, .. }) => {
                 let st1 = self.parser.id_vec(st1).clone();
                 let st2 = self.parser.id_vec(st2).clone();
 
@@ -732,17 +736,14 @@ impl<'a> Semantic<'a> {
 
     fn get_poly_copy(&self, id: Id) -> Option<Id> {
         match self.types[id] {
-            Type::Struct {
-                copied_from,
-                ..
-            } => copied_from,
+            Type::Struct { copied_from, .. } => copied_from,
             Type::Enum { copied_from, .. } => copied_from,
             Type::Func { copied_from, .. } => copied_from,
-            _ => None
+            _ => None,
         }
     }
 
-    fn unify_types(&mut self) {
+    fn unify_types(&mut self) -> Result<(), CompileError> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
@@ -764,15 +765,23 @@ impl<'a> Semantic<'a> {
                 .map(|(ty, _)| ty)
                 .collect::<Vec<_>>();
 
-            // for &ty in tys.iter() {
-            //     if &self.types[ty] != &self.types[tys[0]] {
-            //         todo!(
-            //             "error message for types not equal: {:?} vs {:?}",
-            //             &self.types[ty],
-            //             &self.types[tys[0]],
-            //         )
-            //     }
-            // }
+            for &ty in tys.iter() {
+                let check_err = match (self.types[ty], self.types[tys[0]]) {
+                    (Type::Basic(_), _) => true,
+                    (_, Type::Basic(_)) => true,
+                    _ => false,
+                };
+
+                if check_err && self.types[ty] != self.types[tys[0]] {
+                    return Err(CompileError::from_string(
+                        format!(
+                            "Type unification failed for types {:?} and {:?}",
+                            &self.types[ty], &self.types[tys[0]]
+                        ),
+                        self.parser.ranges[ty],
+                    ));
+                }
+            }
 
             // set all types to whatever we unified to
             if let Some(&ty) = tys.first() {
@@ -800,6 +809,8 @@ impl<'a> Semantic<'a> {
         for uid in to_clear {
             self.type_matches.remove(uid);
         }
+
+        Ok(())
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {

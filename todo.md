@@ -24,10 +24,12 @@
 - [ ] generics
   - [x] for functions
   - [x] for structs
+  - [ ] for enums
   - [x] copy functions/structs when instantiating so we can do multiple
   - [ ] baking
-  - [ ] check conflicts during unification
-- [ ] (mutually) recursive structs / functions
+  - [x] check conflicts during unification
+- [x] (mutually) recursive structs / functions
+- [ ] compile-time functions -> macros
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] more math
 - [ ] void return type

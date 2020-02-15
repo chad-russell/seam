@@ -1325,7 +1325,7 @@ impl<'a> Parser<'a> {
         IdVec(self.id_vecs.len() - 1)
     }
 
-    fn parse_value_param(&mut self) -> Result<Id, CompileError> {
+    fn parse_value_param(&mut self, index: u16) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
         let name = if let Token::Symbol(_) = self.lexer.top.tok {
@@ -1345,19 +1345,17 @@ impl<'a> Parser<'a> {
 
         Ok(self.push_node(
             Range::new(start, end),
-            Node::ValueParam {
-                name,
-                value,
-                index: 0,
-            },
+            Node::ValueParam { name, value, index },
         ))
     }
 
     fn parse_value_params(&mut self) -> Result<IdVec, CompileError> {
         let mut params = IdVecB::new();
 
+        let mut vp_index = 0;
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
-            params.push(self.parse_value_param()?);
+            params.push(self.parse_value_param(vp_index)?);
+            vp_index += 1;
 
             if self.lexer.top.tok == Token::Comma {
                 self.lexer.pop(); // `,`
