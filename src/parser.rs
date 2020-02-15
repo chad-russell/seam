@@ -2,9 +2,15 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ops::Deref;
 
+use smallvec::{smallvec, SmallVec};
+
 use string_interner::StringInterner;
 
 type Sym = usize;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IdVec(Id);
+pub type IdVecB = SmallVec<[Id; 8]>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
@@ -57,23 +63,23 @@ pub enum BasicType {
 }
 
 // TODO: make this copy
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Type {
     Unassigned,
     Basic(BasicType),
     Pointer(Id),
     String,
-    Func { return_ty: Id, input_tys: Vec<Id> },
-    Struct(Vec<Id>),
-    Enum(Vec<Id>),
+    Func { return_ty: Id, input_tys: IdVec },
+    Struct(IdVec),
+    Enum(IdVec),
     Type,
 }
 
 impl Type {
-    pub fn as_struct_params(&self) -> Option<&Vec<Id>> {
+    pub fn as_struct_params(&self) -> Option<IdVec> {
         match self {
-            Type::Struct(params) => Some(params),
-            Type::Enum(params) => Some(params),
+            Type::Struct(params) => Some(*params),
+            Type::Enum(params) => Some(*params),
             _ => None,
         }
     }
@@ -507,6 +513,9 @@ pub struct Parser<'a> {
     pub scopes: Vec<Scope>,
     top_scope: Id,
 
+    // tdoo(chad): flatten this (??)
+    pub id_vecs: Vec<IdVecB>,
+
     pub copying: bool,
 
     // todo(chad): represent list of locals per function
@@ -593,11 +602,10 @@ pub enum Node {
     Func {
         name: Sym,
         scope: Id,
-        ct_params: Vec<Id>,
-        params: Vec<Id>,
+        ct_params: Option<IdVec>,
+        params: IdVec,
         return_ty: Id,
-        stmts: Vec<Id>,
-        is_specialized: bool,
+        stmts: IdVec,
     },
     DeclParam {
         name: Sym,
@@ -606,12 +614,12 @@ pub enum Node {
     },
     Struct {
         name: Sym,
-        ct_params: Vec<Id>,
-        params: Vec<Id>,
+        ct_params: Option<IdVec>,
+        params: IdVec,
     },
     Enum {
         name: Sym,
-        params: Vec<Id>,
+        params: IdVec,
     },
     ValueParam {
         name: Option<Sym>,
@@ -620,12 +628,12 @@ pub enum Node {
     },
     StructLiteral {
         name: Option<Sym>,
-        params: Vec<Id>,
+        params: IdVec,
     },
     Call {
         name: Id,
-        ct_params: Vec<Id>,
-        params: Vec<Id>,
+        ct_params: Option<IdVec>,
+        params: IdVec,
         is_indirect: bool,
     },
     Add(Id, Id),
@@ -638,8 +646,15 @@ pub enum Node {
     And(Id, Id),
     Or(Id, Id),
     Not(Id),
-    If(Id, Id, Option<Id>),
-    While(Id, Vec<Id>),
+    If {
+        cond: Id,
+        true_stmts: IdVec,
+        false_stmts: Option<IdVec>,
+    },
+    While {
+        cond: Id,
+        stmts: IdVec,
+    },
 }
 
 impl TryInto<Type> for Node {
@@ -670,7 +685,7 @@ impl Node {
 
     pub fn param_field_name(&self) -> Option<Sym> {
         match self {
-            Node::DeclParam { name, ty, index } => Some(*name),
+            Node::DeclParam { name, .. } => Some(*name),
             _ => None,
         }
     }
@@ -728,6 +743,7 @@ impl<'a> Parser<'a> {
             copying: false,
             top_level: Default::default(),
             top_level_map: Default::default(),
+            id_vecs: Default::default(),
             sym_let,
             sym_return,
             sym_none,
@@ -968,8 +984,18 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let true_stmts = self.push_id_vec(smallvec![true_expr]);
+        let false_stmts = false_expr.map(|fe| self.push_id_vec(smallvec![fe]));
+
         let range = self.expect_close_paren(start)?;
-        let if_id = self.push_node(range, Node::If(cond_expr, true_expr, false_expr));
+        let if_id = self.push_node(
+            range,
+            Node::If {
+                cond: cond_expr,
+                true_stmts,
+                false_stmts,
+            },
+        );
 
         self.local_insert(if_id);
 
@@ -977,16 +1003,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
-        let cond_expr = self.parse_expression()?;
+        let cond = self.parse_expression()?;
 
-        let mut stmts = Vec::new();
+        let mut stmts = IdVecB::new();
         while let Token::LParen = self.lexer.top.tok {
             stmts.push(self.parse_fn_stmt()?);
         }
+        let stmts = self.push_id_vec(stmts);
 
         let range = self.expect_close_paren(start)?;
 
-        Ok(self.push_node(range, Node::While(cond_expr, stmts)))
+        Ok(self.push_node(range, Node::While { cond, stmts }))
     }
 
     fn parse_expression(&mut self) -> Result<Id, CompileError> {
@@ -1076,9 +1103,9 @@ impl<'a> Parser<'a> {
                             self.expect(&Token::LParen)?;
                             let params = self.parse_value_params()?;
                             self.expect(&Token::RParen)?;
-                            params
+                            Some(params)
                         } else {
-                            Vec::new()
+                            None
                         };
 
                         self.expect(&Token::LParen)?;
@@ -1251,8 +1278,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_params(&mut self) -> Result<Vec<Id>, CompileError> {
-        let mut params = Vec::new();
+    fn parse_params(&mut self) -> Result<IdVec, CompileError> {
+        let mut params = IdVecB::new();
 
         let mut index = 0;
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
@@ -1284,7 +1311,12 @@ impl<'a> Parser<'a> {
             index += 1;
         }
 
-        Ok(params)
+        Ok(self.push_id_vec(params))
+    }
+
+    fn push_id_vec(&mut self, id_vec: IdVecB) -> IdVec {
+        self.id_vecs.push(id_vec);
+        IdVec(self.id_vecs.len() - 1)
     }
 
     fn parse_value_param(&mut self) -> Result<Id, CompileError> {
@@ -1315,8 +1347,8 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_value_params(&mut self) -> Result<Vec<Id>, CompileError> {
-        let mut params = Vec::new();
+    fn parse_value_params(&mut self) -> Result<IdVec, CompileError> {
+        let mut params = IdVecB::new();
 
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
             params.push(self.parse_value_param()?);
@@ -1325,6 +1357,8 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `,`
             }
         }
+
+        let params = self.push_id_vec(params);
 
         Ok(params)
     }
@@ -1345,9 +1379,9 @@ impl<'a> Parser<'a> {
             self.expect(&Token::LParen)?;
             let ct_params = self.parse_params()?;
             self.expect(&Token::RParen)?;
-            ct_params
+            Some(ct_params)
         } else {
-            Vec::new()
+            None
         };
 
         self.lexer.top.range.start;
@@ -1359,11 +1393,12 @@ impl<'a> Parser<'a> {
 
         self.expect(&Token::LCurly)?;
 
-        let mut stmts = Vec::new();
+        let mut stmts = IdVecB::new();
         while self.lexer.top.tok != Token::RCurly {
             let stmt = self.parse_fn_stmt()?;
             stmts.push(stmt);
         }
+        let stmts = self.push_id_vec(stmts);
 
         let range = self.expect_range(start, Token::RCurly)?;
 
@@ -1376,7 +1411,6 @@ impl<'a> Parser<'a> {
                 params,
                 return_ty,
                 stmts,
-                is_specialized: false,
             },
         );
 
@@ -1431,9 +1465,9 @@ impl<'a> Parser<'a> {
             self.expect(&Token::LParen)?;
             let params = self.parse_params()?;
             self.expect(&Token::RParen)?;
-            params
+            Some(params)
         } else {
-            Vec::new()
+            None
         };
 
         self.expect(&Token::LCurly)?;
@@ -1464,5 +1498,9 @@ impl<'a> Parser<'a> {
         let range = self.ranges[id];
 
         self.lexer.original_source[range.start.char_offset..range.end.char_offset].to_string()
+    }
+
+    pub fn id_vec(&self, idv: IdVec) -> &IdVecB {
+        &self.id_vecs[idv.0]
     }
 }

@@ -1,6 +1,10 @@
-use crate::parser::{BasicType, CompileError, Id, Location, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 
 type Sym = usize;
+
+use smallvec::SmallVec;
+
+use crossbeam_utils::atomic::AtomicCell;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -49,7 +53,7 @@ impl<'a> Semantic<'a> {
         // todo(chad): clone *sigh*
         for tl in self.parser.top_level.clone().iter() {
             let is_poly = match &self.parser.nodes[*tl] {
-                Node::Func { ct_params, .. } => !ct_params.is_empty(),
+                Node::Func { ct_params, .. } => ct_params.is_some(),
                 _ => false,
             };
 
@@ -197,16 +201,19 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
-                let params = self.types[unpointered_ty]
-                    .as_struct_params()
-                    .ok_or(CompileError::from_string(
+                let params = self.types[unpointered_ty].as_struct_params().ok_or(
+                    CompileError::from_string(
                         format!(
                             "Expected struct or enum, got {:?} for node {}",
                             self.parser.debug(unpointered_ty),
                             unpointered_ty,
                         ),
                         self.parser.ranges[*base],
-                    ))?
+                    ),
+                )?;
+                let params = &self
+                    .parser
+                    .id_vec(params)
                     .iter()
                     .enumerate()
                     .map(|(_index, id)| {
@@ -251,7 +258,8 @@ impl<'a> Semantic<'a> {
                     Coercion::Id(id) => match &self.types[id] {
                         Type::Struct(params) => (
                             Some(
-                                params
+                                self.parser
+                                    .id_vec(*params)
                                     .iter()
                                     .map(|p| {
                                         let (name, id, index) =
@@ -264,7 +272,8 @@ impl<'a> Semantic<'a> {
                         ),
                         Type::Enum(params) => (
                             Some(
-                                params
+                                self.parser
+                                    .id_vec(*params)
                                     .iter()
                                     .map(|p| {
                                         let (name, id, index) =
@@ -285,8 +294,8 @@ impl<'a> Semantic<'a> {
                     _ => (None, None),
                 };
 
-                for param in params {
-                    let (name, _, _) = self.parser.nodes[*param].as_value_param().unwrap();
+                for param in self.parser.id_vec(*params).clone() {
+                    let (name, _, _) = self.parser.nodes[param].as_value_param().unwrap();
 
                     let coercion = match &params_map {
                         Some(params_map) => {
@@ -294,7 +303,7 @@ impl<'a> Semantic<'a> {
                                 .get(&name.expect("todo: handle missing name"))
                                 .expect("todo: handle wrong param");
 
-                            match self.parser.nodes.get_mut(*param).unwrap() {
+                            match self.parser.nodes.get_mut(param).unwrap() {
                                 Node::ValueParam { index, .. } => {
                                     *index = *param_index;
                                 }
@@ -306,7 +315,7 @@ impl<'a> Semantic<'a> {
                         None => Coercion::None,
                     };
 
-                    self.assign_type(*param, coercion)?;
+                    self.assign_type(param, coercion)?;
                 }
 
                 match lit_ty {
@@ -350,16 +359,17 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Func {
-                name: _,        // Sym,
-                scope: _,       // Id,
-                ct_params,      // Vec<Id>,
-                params,         // Vec<Id>,
-                return_ty,      // Id,
-                stmts,          // Vec<Id>,
-                is_specialized, // bool,
+                name: _,   // Sym,
+                scope: _,  // Id,
+                ct_params, // Vec<Id>,
+                params,    // Vec<Id>,
+                return_ty, // Id,
+                stmts,     // Vec<Id>,
             } => {
-                for &ct_param in ct_params.iter() {
-                    self.assign_type(ct_param, Coercion::None)?;
+                if let Some(ct_params) = *ct_params {
+                    for ct_param in self.parser.id_vec(ct_params).clone() {
+                        self.assign_type(ct_param, Coercion::None)?;
+                    }
                 }
 
                 self.assign_type(*return_ty, Coercion::None)?;
@@ -370,11 +380,11 @@ impl<'a> Semantic<'a> {
                     function_return_tys.borrow_mut().pop();
                 }};
 
-                for &param in params.iter() {
+                for param in self.parser.id_vec(*params).clone() {
                     self.assign_type(param, Coercion::None)?;
                 }
 
-                for &stmt in stmts.iter() {
+                for stmt in self.parser.id_vec(*stmts).clone() {
                     self.assign_type(stmt, Coercion::None)?;
                     self.unify_types();
                 }
@@ -408,27 +418,27 @@ impl<'a> Semantic<'a> {
                 self.match_types(id, *ret_id);
                 Ok(())
             }
-            Node::If(cond_id, true_id, false_id) => {
-                self.assign_type(*cond_id, Coercion::Basic(BasicType::Bool))?;
-                self.assign_type(*true_id, Coercion::None)?;
+            // Node::If { cond_id, true_id, false_id } => {
+            //     self.assign_type(*cond_id, Coercion::Basic(BasicType::Bool))?;
+            //     self.assign_type(*true_id, Coercion::None)?;
 
-                if false_id.is_some() {
-                    self.assign_type(false_id.unwrap(), Coercion::Id(*true_id))?;
-                }
+            //     if false_id.is_some() {
+            //         self.assign_type(false_id.unwrap(), Coercion::Id(*true_id))?;
+            //     }
 
-                // todo(chad): enforce unit type for single-armed if stmts
-                self.match_types(id, *true_id);
+            //     // todo(chad): enforce unit type for single-armed if stmts
+            //     self.match_types(id, *true_id);
 
-                Ok(())
-            }
-            Node::While(cond, stmts) => {
-                self.assign_type(*cond, Coercion::Basic(BasicType::Bool))?;
-                for &stmt in stmts {
-                    self.assign_type(stmt, Coercion::None)?;
-                }
+            //     Ok(())
+            // }
+            // Node::While(cond, stmts) => {
+            //     self.assign_type(*cond, Coercion::Basic(BasicType::Bool))?;
+            //     for &stmt in stmts {
+            //         self.assign_type(stmt, Coercion::None)?;
+            //     }
 
-                Ok(())
-            }
+            //     Ok(())
+            // }
             Node::Ref(ref_id) => {
                 // todo(chad): coercion
                 self.assign_type(*ref_id, Coercion::None)?;
@@ -471,22 +481,22 @@ impl<'a> Semantic<'a> {
                         input_tys,
                     } => {
                         self.assign_type(*return_ty, Coercion::None)?;
-                        for &input_ty in input_tys {
+                        for input_ty in self.parser.id_vec(*input_tys).clone() {
                             self.assign_type(input_ty, Coercion::None)?;
                         }
 
                         self.types[id] = ty.clone();
                     }
                     Type::Struct(params) => {
-                        for ty in params {
-                            self.assign_type(*ty, Coercion::None)?;
+                        for ty in self.parser.id_vec(*params).clone() {
+                            self.assign_type(ty, Coercion::None)?;
                         }
 
                         self.types[id] = ty.clone();
                     }
                     Type::Enum(params) => {
-                        for ty in params {
-                            self.assign_type(*ty, Coercion::None)?;
+                        for ty in self.parser.id_vec(*params).clone() {
+                            self.assign_type(ty, Coercion::None)?;
                         }
 
                         self.types[id] = ty.clone();
@@ -505,7 +515,7 @@ impl<'a> Semantic<'a> {
                 let resolved_func = self.resolve(*name)?;
 
                 let is_ct = match &self.parser.nodes[resolved_func] {
-                    Node::Func { ct_params, .. } => ct_params.len() > 0,
+                    Node::Func { ct_params, .. } => ct_params.is_some(),
                     _ => match &self.types[resolved_func] {
                         // if it's a pure function type (already specialized) then it's not ct
                         Type::Func { .. } => false,
@@ -538,11 +548,16 @@ impl<'a> Semantic<'a> {
 
                 if is_ct {
                     // match given ct_params against declared ct_params
-                    let given = ct_params;
+                    let given = ct_params
+                        .map(|p| self.parser.id_vec(p).clone())
+                        .unwrap_or(SmallVec::new());
                     let decl = match &self.parser.nodes[resolved_func] {
-                        Node::Func { ct_params, .. } => ct_params.clone(),
+                        Node::Func { ct_params, .. } => ct_params,
                         _ => unreachable!(),
                     };
+                    let decl = decl
+                        .map(|p| self.parser.id_vec(p).clone())
+                        .unwrap_or(SmallVec::new());
 
                     for (g, d) in given.iter().zip(decl.iter()) {
                         self.assign_type(*d, Coercion::None)?;
@@ -551,14 +566,15 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
-                let given = params;
+                let given = self.parser.id_vec(*params).clone();
                 let decl = match &self.parser.nodes[resolved_func] {
-                    Node::Func { params, .. } => params.clone(),
+                    Node::Func { params, .. } => params,
                     _ => match &self.types[resolved_func] {
-                        Type::Func { input_tys, .. } => input_tys.clone(),
+                        Type::Func { input_tys, .. } => input_tys,
                         _ => unreachable!(),
                     },
                 };
+                let decl = self.parser.id_vec(*decl).clone();
 
                 for (g, d) in given.iter().zip(decl.iter()) {
                     self.assign_type(*d, Coercion::None)?;
@@ -580,7 +596,7 @@ impl<'a> Semantic<'a> {
             Node::Struct {
                 ct_params, params, ..
             } => {
-                let (ct_params, params, id) = if !ct_params.is_empty() {
+                let (ct_params, params, id) = if ct_params.is_some() {
                     let copied = self.deep_copy_struct(id);
                     self.parser.nodes[id] = self.parser.nodes[copied].clone();
 
@@ -594,19 +610,21 @@ impl<'a> Semantic<'a> {
                     (ct_params.clone(), params.clone(), id)
                 };
 
-                for param in ct_params.iter() {
-                    self.assign_type(*param, Coercion::None)?;
+                if let Some(ct_params) = ct_params {
+                    for param in self.parser.id_vec(ct_params).clone() {
+                        self.assign_type(param, Coercion::None)?;
+                    }
                 }
-                for param in params.iter() {
-                    self.assign_type(*param, Coercion::None)?;
+                for param in self.parser.id_vec(params).clone() {
+                    self.assign_type(param, Coercion::None)?;
                 }
                 self.types[id] = Type::Struct(params.clone());
 
                 Ok(())
             }
             Node::Enum { name: _, params } => {
-                for param in params {
-                    self.assign_type(*param, Coercion::None)?;
+                for param in self.parser.id_vec(*params).clone() {
+                    self.assign_type(param, Coercion::None)?;
                 }
                 self.types[id] = Type::Enum(params.clone());
 
@@ -647,13 +665,8 @@ impl<'a> Semantic<'a> {
             .string_interner
             .get_or_intern(format!("{}_{}", old_name, copied));
         match self.parser.nodes.get_mut(copied).unwrap() {
-            Node::Func {
-                name,
-                is_specialized,
-                ..
-            } => {
+            Node::Func { name, .. } => {
                 *name = new_name;
-                *is_specialized = true;
             }
             _ => unreachable!(),
         };
@@ -719,7 +732,7 @@ impl<'a> Semantic<'a> {
             self.types[ty2] = self.types[ty1].clone();
         }
 
-        match (self.types[ty1].clone(), self.types[ty2].clone()) {
+        match (self.types[ty1], self.types[ty2]) {
             (
                 Type::Func {
                     return_ty: return_ty1,
@@ -730,12 +743,18 @@ impl<'a> Semantic<'a> {
                     input_tys: input_tys2,
                 },
             ) => {
+                let input_tys1 = self.parser.id_vec(input_tys1).clone();
+                let input_tys2 = self.parser.id_vec(input_tys2).clone();
+
                 self.match_types(return_ty1, return_ty2);
                 for (it1, it2) in input_tys1.iter().zip(input_tys2.iter()) {
                     self.match_types(*it1, *it2);
                 }
             }
             (Type::Struct(st1), Type::Struct(st2)) => {
+                let st1 = self.parser.id_vec(st1).clone();
+                let st2 = self.parser.id_vec(st2).clone();
+
                 for (ty1, ty2) in st1.iter().zip(st2.iter()) {
                     self.match_types(*ty1, *ty2);
                 }

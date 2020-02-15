@@ -290,7 +290,7 @@ impl<'a> Backend<'a> {
 
                 let mut sig = module.make_signature();
 
-                for param in params {
+                for param in self.semantic.parser.id_vec(*params) {
                     sig.params
                         .push(AbiParam::new(self.get_cranelift_type(*param)?));
                 }
@@ -335,7 +335,7 @@ impl<'a> Backend<'a> {
                     dynamic_fn_ptr_decl: dfp_decl,
                     module: &mut module,
                 };
-                for stmt in stmts.iter() {
+                for stmt in self.semantic.parser.id_vec(*stmts) {
                     fb.compile_id(*stmt)?;
                 }
 
@@ -409,9 +409,22 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Type::Basic(BasicType::F64) => 8,
             Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
             Type::Func { .. } => self.module.isa().pointer_bytes() as _,
-            Type::Struct(params) => params.iter().map(|p| self.type_size(*p)).sum(),
+            Type::Struct(params) => self
+                .semantic
+                .parser
+                .id_vec(*params)
+                .iter()
+                .map(|p| self.type_size(*p))
+                .sum(),
             Type::Enum(params) => {
-                let biggest_param = params.iter().map(|p| self.type_size(*p)).max().unwrap_or(0);
+                let biggest_param = self
+                    .semantic
+                    .parser
+                    .id_vec(*params)
+                    .iter()
+                    .map(|p| self.type_size(*p))
+                    .max()
+                    .unwrap_or(0);
                 let tag_size = ENUM_TAG_SIZE_BYTES;
                 tag_size + biggest_param
             }
@@ -579,6 +592,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 // if this typechecked as an enum, handle things a bit differently
                 match &self.semantic.types[id] {
                     Type::Enum(_) => {
+                        let params = self.semantic.parser.id_vec(*params);
+
                         assert_eq!(params.len(), 1);
                         let param = params[0];
                         let size = self.type_size(param) + ENUM_TAG_SIZE_BYTES;
@@ -634,7 +649,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 self.values[id] = Value::Value(addr);
 
-                for param in params {
+                for param in self.semantic.parser.id_vec(*params) {
                     self.compile_id(*param)?;
                     self.store(*param, &Value::Value(addr));
 
@@ -729,15 +744,15 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::Call {
-                name,      // Id
-                ct_params, // Vec<Id>
-                params,    // Vec<Id>
+                name,         // Id
+                ct_params: _, // Vec<Id>
+                params,       // Vec<Id>
                 is_indirect: _,
             } => {
                 // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
 
                 self.compile_id(*name)?;
-                for param in params {
+                for param in self.semantic.parser.id_vec(*params) {
                     self.compile_id(*param)?;
                 }
 
@@ -764,7 +779,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 .unwrap();
 
                 let mut sig = self.module.make_signature();
-                for param in params.iter() {
+                for param in self.semantic.parser.id_vec(*params) {
                     sig.params
                         .push(AbiParam::new(get_cranelift_type(&self.semantic, *param)?));
                 }
@@ -774,7 +789,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     return_ty,
                 )?));
 
-                let cranelift_params = params
+                let cranelift_params = self
+                    .semantic
+                    .parser
+                    .id_vec(*params)
                     .iter()
                     .map(|param| self.rvalue(*param))
                     .collect::<Vec<_>>();
@@ -790,56 +808,56 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
-            Node::If(cond_id, true_id, false_id) => {
-                let size = self.type_size(id);
-                let slot = self.builder.create_stack_slot(StackSlotData {
-                    kind: StackSlotKind::ExplicitSlot,
-                    size,
-                    offset: None,
-                });
-                let slot_addr =
-                    self.builder
-                        .ins()
-                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
-                self.values[id] = Value::Value(slot_addr);
+            // Node::If(cond_id, true_id, false_id) => {
+            //     let size = self.type_size(id);
+            //     let slot = self.builder.create_stack_slot(StackSlotData {
+            //         kind: StackSlotKind::ExplicitSlot,
+            //         size,
+            //         offset: None,
+            //     });
+            //     let slot_addr =
+            //         self.builder
+            //             .ins()
+            //             .stack_addr(self.module.isa().pointer_type(), slot, 0);
+            //     self.values[id] = Value::Value(slot_addr);
 
-                let true_block = self.builder.create_ebb();
-                let false_block = self.builder.create_ebb();
-                let cont_block = self.builder.create_ebb();
+            //     let true_block = self.builder.create_ebb();
+            //     let false_block = self.builder.create_ebb();
+            //     let cont_block = self.builder.create_ebb();
 
-                self.compile_id(*cond_id)?;
-                let cond = self.rvalue(*cond_id);
+            //     self.compile_id(*cond_id)?;
+            //     let cond = self.rvalue(*cond_id);
 
-                self.builder.ins().brnz(cond, true_block, &[]);
-                self.builder.ins().jump(false_block, &[]);
+            //     self.builder.ins().brnz(cond, true_block, &[]);
+            //     self.builder.ins().jump(false_block, &[]);
 
-                // true
-                {
-                    self.builder.switch_to_block(true_block);
-                    self.current_block = true_block;
-                    self.compile_id(*true_id)?;
+            //     // true
+            //     {
+            //         self.builder.switch_to_block(true_block);
+            //         self.current_block = true_block;
+            //         self.compile_id(*true_id)?;
 
-                    self.store(*true_id, &Value::Value(slot_addr));
+            //         self.store(*true_id, &Value::Value(slot_addr));
 
-                    self.builder.ins().jump(cont_block, &[]);
-                }
+            //         self.builder.ins().jump(cont_block, &[]);
+            //     }
 
-                // false
-                if false_id.is_some() {
-                    self.builder.switch_to_block(false_block);
-                    self.current_block = false_block;
-                    self.compile_id(false_id.unwrap())?;
+            //     // false
+            //     if false_id.is_some() {
+            //         self.builder.switch_to_block(false_block);
+            //         self.current_block = false_block;
+            //         self.compile_id(false_id.unwrap())?;
 
-                    self.store(false_id.unwrap(), &Value::Value(slot_addr));
+            //         self.store(false_id.unwrap(), &Value::Value(slot_addr));
 
-                    self.builder.ins().jump(cont_block, &[]);
-                }
+            //         self.builder.ins().jump(cont_block, &[]);
+            //     }
 
-                self.builder.switch_to_block(cont_block);
-                self.current_block = cont_block;
+            //     self.builder.switch_to_block(cont_block);
+            //     self.current_block = cont_block;
 
-                Ok(())
-            }
+            //     Ok(())
+            // }
             Node::Ref(ref_id) => {
                 self.compile_id(*ref_id)?;
                 match self.values[*ref_id] {
@@ -928,9 +946,13 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let offset = if is_enum {
                     ENUM_TAG_SIZE_BYTES
                 } else {
-                    self.semantic.types[unpointered_ty]
+                    let params = self.semantic.types[unpointered_ty]
                         .as_struct_params()
-                        .unwrap()
+                        .unwrap();
+
+                    self.semantic
+                        .parser
+                        .id_vec(params)
                         .iter()
                         .enumerate()
                         .map(|(_index, id)| {
