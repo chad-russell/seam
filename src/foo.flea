@@ -49,7 +49,7 @@ fn main() i64 {
     // return call(id, 10);
 
     // return test_fn_ptr();
-    return cpi_test();
+    // return cpi_test();
     // return baz();
     // return bar();
     // return test_load_param();
@@ -134,7 +134,7 @@ fn cpi_test() i64 {
     // assert(3 == ^^baz.qux.value);
     // assert(3 == ^^qux.value);
 
-    // return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
+    return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
 }
     
 fn test_load_param() i64 {

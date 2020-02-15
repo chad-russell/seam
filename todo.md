@@ -28,6 +28,7 @@
   - [ ] baking
   - [ ] check conflicts during unification
 - [ ] (mutually) recursive structs / functions
+- [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] more math
 - [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)

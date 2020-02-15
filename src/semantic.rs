@@ -376,6 +376,7 @@ impl<'a> Semantic<'a> {
 
                 for &stmt in stmts.iter() {
                     self.assign_type(stmt, Coercion::None)?;
+                    self.unify_types();
                 }
 
                 self.topo.push(id);
@@ -384,10 +385,6 @@ impl<'a> Semantic<'a> {
                     return_ty: *return_ty,
                     input_tys: params.clone(),
                 };
-
-                // if ct_params.is_empty() {
-                //     self.topo.push(id);
-                // }
 
                 Ok(())
             }
@@ -696,15 +693,14 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn find_type_array_index(&mut self, id: Id) -> usize {
+    fn find_type_array_index(&mut self, id: Id) -> Option<usize> {
         for (index, m) in self.type_matches.iter().enumerate() {
             if m.contains(&id) {
-                return index;
+                return Some(index);
             }
         }
 
-        self.type_matches.push(vec![id]);
-        self.type_matches.len() - 1
+        None
     }
 
     fn type_specificity(&self, id: Id) -> i16 {
@@ -765,14 +761,20 @@ impl<'a> Semantic<'a> {
         let id1 = self.find_type_array_index(ty1);
         let id2 = self.find_type_array_index(ty2);
 
-        if id1 != id2 {
-            let lower = id1.min(id2);
-            let upper = id1.max(id2);
+        match (id1, id2) {
+            (None, None) => self.type_matches.push(vec![ty1, ty2]),
+            (Some(id), None) => self.type_matches[id].push(ty2),
+            (None, Some(id)) => self.type_matches[id].push(ty2),
+            (Some(id1), Some(id2)) if id1 != id2 => {
+                let lower = id1.min(id2);
+                let upper = id1.max(id2);
 
-            // todo(chad): partition or something
-            let upper_matches = self.type_matches[upper].clone();
-            self.type_matches[lower].extend(upper_matches);
-            self.type_matches.remove(upper);
+                // todo(chad): partition or something
+                let upper_matches = self.type_matches[upper].clone();
+                self.type_matches[lower].extend(upper_matches);
+                self.type_matches.remove(upper);
+            }
+            (_, _) => (),
         }
     }
 
@@ -838,14 +840,14 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {
-        self.parser
-            .scope_get(sym, id)
-            .ok_or(CompileError::from_string(
+        self.parser.scope_get(sym, id).ok_or_else(|| {
+            CompileError::from_string(
                 format!(
                     "Undeclared identifier {}",
                     self.parser.resolve_sym_unchecked(sym)
                 ),
                 self.parser.ranges[id],
-            ))
+            )
+        })
     }
 }

@@ -11,3 +11,6 @@ cranelift-module = "0.56.0"
 cranelift-simplejit = "0.56.0"
 lazy_static = "1.4.0"
 scopeguard = "1.0.0"
+
+[profile.release]
+debug = true
