@@ -526,7 +526,7 @@ pub struct Parser<'a> {
     pub node_scopes: Vec<Id>,
 
     pub scopes: Vec<Scope>,
-    top_scope: Id,
+    pub top_scope: Id,
 
     pub returns: Vec<Id>,
 
@@ -1224,7 +1224,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_fn_stmt(&mut self) -> Result<Id, CompileError> {
+    pub fn parse_fn_stmt(&mut self) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
@@ -1563,5 +1563,9 @@ impl<'a> Parser<'a> {
 
     pub fn id_vec(&self, idv: IdVec) -> &Vec<Id> {
         &self.id_vecs[idv.0]
+    }
+
+    pub fn id_vec_mut(&mut self, idv: IdVec) -> &mut Vec<Id> {
+        &mut self.id_vecs[idv.0]
     }
 }

@@ -11,6 +11,7 @@ pub struct Semantic<'a> {
     pub lhs_assign: bool,
     pub type_matches: Vec<Vec<Id>>,
     pub macro_phase: bool,
+    pub macro_expansion_site: Option<Id>, // todo(chad): make this just Id once we're confident it's always set
 }
 
 impl<'a> Semantic<'a> {
@@ -23,6 +24,7 @@ impl<'a> Semantic<'a> {
             lhs_assign: false,
             type_matches: Vec::new(),
             macro_phase: false,
+            macro_expansion_site: None,
         }
     }
 
@@ -34,9 +36,6 @@ impl<'a> Semantic<'a> {
 
             let mut backend = crate::Backend::new(self);
             backend.compile()?;
-
-            // dbg!(backend.call_func("foo"));
-            // panic!("WE DID A THING");
         }
 
         for &call in self.parser.calls.iter() {
@@ -57,6 +56,8 @@ impl<'a> Semantic<'a> {
                             (crate::backend::FUNC_PTRS.lock().unwrap())[name],
                         )
                     };
+
+                    self.macro_expansion_site = Some(call);
 
                     f(self as _);
                 }
@@ -663,6 +664,28 @@ impl<'a> Semantic<'a> {
         self.parser.copying = true;
 
         let copied = self.parser.parse_struct(range.start).unwrap();
+
+        while self.types.len() < self.parser.nodes.len() {
+            self.types.push(Type::Unassigned);
+        }
+
+        copied
+    }
+
+    pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
+        println!("copying stmt!");
+
+        let range = self.parser.ranges[id];
+        let source =
+            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+
+        self.parser
+            .lexer
+            .update_source_for_copy(source, range.start);
+        self.parser.top_scope = scope;
+        self.parser.copying = true;
+
+        let copied = self.parser.parse_fn_stmt().unwrap();
 
         while self.types.len() < self.parser.nodes.len() {
             self.types.push(Type::Unassigned);

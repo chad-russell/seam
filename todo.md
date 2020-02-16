@@ -29,8 +29,8 @@
   - [ ] baking
   - [x] check conflicts during unification
 - [x] (mutually) recursive structs / functions
-- [ ] job queue
 - [ ] compile-time functions -> macros
+- [ ] return type inference (`fn foo() { return 3; }` should infer return type i64)
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] more math
 - [ ] void return type

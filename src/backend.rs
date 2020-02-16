@@ -972,15 +972,6 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Insert(stmts) => {
                 // When this macro runs, we want to tell the compiler to insert the statements.
                 // We accomplish that by generating a function call
-
-                // let mut sig = self.module.make_signature();
-                // sig.params.push(AbiParam::new(types::I64));
-                // sig.returns.push(AbiParam::new(types::I64));
-                // let sig = self.builder.import_signature(sig);
-
-                let self_ptr = self as *const FunctionBackend as i64;
-                // println!("sending {}", self_ptr);
-
                 let current_fn_params = self.builder.ebb_params(self.current_block);
                 let cranelift_params = &[
                     current_fn_params[0],
@@ -1136,23 +1127,36 @@ fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id) -> 
     }
 }
 
-// todo(chad): this would be dynamically generated/cached on the fly for the real version, so we could handle any combination of arguments
 fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
 
 fn macro_insert(semantic: *mut Semantic, stmts: Id) {
-    let semantic: &Semantic = unsafe { std::mem::transmute(semantic) };
+    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
     let stmts = IdVec(stmts);
+    let expansion_site = semantic.macro_expansion_site.unwrap();
+    let scope = semantic.parser.node_scopes[expansion_site];
 
     println!("****");
     println!(
-        "inserting stmts for current macro expansion context: {:?}",
-        stmts
+        "inserting stmts for current macro expansion context: {:?} {}",
+        stmts,
+        semantic.parser.debug(expansion_site)
     );
 
-    for stmt in semantic.parser.id_vec(stmts) {
-        println!("inserting statement :: {}", semantic.parser.debug(*stmt));
+    let insertion_point = match semantic.parser.nodes[expansion_site] {
+        Node::Call { macro_stmts, .. } => macro_stmts,
+        _ => unreachable!(),
+    };
+
+    let mut inserted_stmts = Vec::new();
+    for stmt in semantic.parser.id_vec(stmts).clone() {
+        println!("inserting statement :: {}", semantic.parser.debug(stmt));
+        inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
     }
+
+    let insertion_point = semantic.parser.id_vec_mut(insertion_point);
+    insertion_point.extend(inserted_stmts.iter());
+
     println!();
 }
