@@ -2,15 +2,12 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::ops::Deref;
 
-use smallvec::SmallVec;
-
 use string_interner::StringInterner;
 
 type Sym = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct IdVec(Id);
-pub type IdVecB = SmallVec<[Id; 8]>;
+pub struct IdVec(pub Id);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
@@ -128,6 +125,7 @@ enum Token {
     Enum,
     Fn,
     Macro,
+    Insert,
     True,
     False,
     I8,
@@ -354,6 +352,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("macro", Token::Macro) {
             return;
         }
+        if self.prefix_keyword("#insert", Token::Insert) {
+            return;
+        }
         if self.prefix_keyword("i8", Token::I8) {
             return;
         }
@@ -527,14 +528,17 @@ pub struct Parser<'a> {
     pub scopes: Vec<Scope>,
     top_scope: Id,
 
+    pub returns: Vec<Id>,
+
     // tdoo(chad): flatten this (??)
-    pub id_vecs: Vec<IdVecB>,
+    pub id_vecs: Vec<Vec<Id>>,
 
     pub copying: bool,
 
     // todo(chad): represent list of locals per function
     pub top_level: Vec<Id>,
     pub macros: Vec<Id>,
+    pub calls: Vec<Id>,
     pub top_level_map: BTreeMap<Sym, Id>,
 
     sym_let: Sym,
@@ -621,7 +625,10 @@ pub enum Node {
         params: IdVec,
         return_ty: Id,
         stmts: IdVec,
+        returns: IdVec,
+        is_macro: bool,
     },
+    Insert(IdVec),
     DeclParam {
         name: Sym,
         ty: Id,
@@ -650,7 +657,8 @@ pub enum Node {
         name: Id,
         ct_params: Option<IdVec>,
         params: IdVec,
-        is_indirect: bool,
+        is_macro: bool,
+        macro_stmts: IdVec,
     },
     // Add(Id, Id),
     // Sub(Id, Id),
@@ -752,8 +760,10 @@ impl<'a> Parser<'a> {
             copying: false,
             top_level: Default::default(),
             macros: Default::default(),
+            calls: Default::default(),
             top_level_map: Default::default(),
             id_vecs: Default::default(),
+            returns: Default::default(),
             sym_let,
             sym_return,
             sym_none,
@@ -1007,8 +1017,8 @@ impl<'a> Parser<'a> {
     //         None
     //     };
 
-    //     let true_stmts = self.push_id_vec(smallvec![true_expr]);
-    //     let false_stmts = false_expr.map(|fe| self.push_id_vec(smallvec![fe]));
+    //     let true_stmts = self.push_id_vec(vec![true_expr]);
+    //     let false_stmts = false_expr.map(|fe| self.push_id_vec(vec![fe]));
 
     //     let range = self.expect_close_paren(start)?;
     //     let if_id = self.push_node(
@@ -1028,7 +1038,7 @@ impl<'a> Parser<'a> {
     // fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
     //     let cond = self.parse_expression()?;
 
-    //     let mut stmts = IdVecB::new();
+    //     let mut stmts = Vec::new();
     //     while let Token::LParen = self.lexer.top.tok {
     //         stmts.push(self.parse_fn_stmt()?);
     //     }
@@ -1136,15 +1146,19 @@ impl<'a> Parser<'a> {
                         let params = self.parse_value_params()?;
                         let range = self.expect_range(start, Token::RParen)?;
 
+                        let macro_stmts = self.push_id_vec(Vec::new());
                         value = self.push_node(
                             range,
                             Node::Call {
                                 name: value,
                                 ct_params,
                                 params,
-                                is_indirect: false,
+                                is_macro: false,
+                                macro_stmts,
                             },
                         );
+
+                        self.calls.push(value);
                     } else {
                         todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
                     }
@@ -1214,13 +1228,15 @@ impl<'a> Parser<'a> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
-            // todo(chad): turn `return`, `let`, etc. into their own tokens rather than parsing as symbols
             Token::Symbol(sym) if sym == self.sym_return => {
                 self.lexer.pop(); // `return`
                 let expr = self.parse_expression()?;
                 let range = self.expect_range(start, Token::Semicolon)?;
 
-                Ok(self.push_node(range, Node::Return(expr)))
+                let ret_id = self.push_node(range, Node::Return(expr));
+                self.returns.push(ret_id);
+
+                Ok(ret_id)
             }
             Token::Symbol(sym) if sym == self.sym_let => {
                 self.lexer.pop(); // `let`
@@ -1251,6 +1267,19 @@ impl<'a> Parser<'a> {
 
                 Ok(let_id)
             }
+            Token::Insert => {
+                self.lexer.pop(); // `#insert`
+
+                self.expect(&Token::LCurly)?;
+                let mut stmts = Vec::new();
+                while self.lexer.top.tok != Token::RCurly {
+                    stmts.push(self.parse_fn_stmt()?);
+                }
+                let stmts = self.push_id_vec(stmts);
+                let range = self.expect_range(start, Token::RCurly)?;
+
+                Ok(self.push_node(range, Node::Insert(stmts)))
+            }
             _ => {
                 let lvalue = self.parse_expression()?;
 
@@ -1271,7 +1300,10 @@ impl<'a> Parser<'a> {
                             },
                         ))
                     }
-                    _ => Ok(lvalue),
+                    _ => {
+                        self.ranges[lvalue] = self.expect_range(start, Token::Semicolon)?;
+                        Ok(lvalue)
+                    }
                 }
             }
         }
@@ -1291,7 +1323,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_params(&mut self) -> Result<IdVec, CompileError> {
-        let mut params = IdVecB::new();
+        let mut params = Vec::new();
 
         let mut index = 0;
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
@@ -1326,7 +1358,7 @@ impl<'a> Parser<'a> {
         Ok(self.push_id_vec(params))
     }
 
-    fn push_id_vec(&mut self, id_vec: IdVecB) -> IdVec {
+    fn push_id_vec(&mut self, id_vec: Vec<Id>) -> IdVec {
         self.id_vecs.push(id_vec);
         IdVec(self.id_vecs.len() - 1)
     }
@@ -1356,7 +1388,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_value_params(&mut self) -> Result<IdVec, CompileError> {
-        let mut params = IdVecB::new();
+        let mut params = Vec::new();
 
         let mut vp_index = 0;
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
@@ -1387,6 +1419,7 @@ impl<'a> Parser<'a> {
 
         // open a new scope
         self.scopes.push(Scope::new(self.top_scope));
+        self.returns.clear();
 
         let old_top_scope = self.top_scope;
         self.top_scope = self.scopes.len() - 1;
@@ -1406,11 +1439,15 @@ impl<'a> Parser<'a> {
         let params = self.parse_params()?;
         self.expect(&Token::RParen)?;
 
-        let return_ty = self.parse_type()?;
+        let return_ty = if self.lexer.top.tok != Token::LCurly {
+            self.parse_type()?
+        } else {
+            self.push_node(self.lexer.top.range, Node::TypeLiteral(Type::Type))
+        };
 
         self.expect(&Token::LCurly)?;
 
-        let mut stmts = IdVecB::new();
+        let mut stmts = Vec::new();
         while self.lexer.top.tok != Token::RCurly {
             let stmt = self.parse_fn_stmt()?;
             stmts.push(stmt);
@@ -1419,6 +1456,7 @@ impl<'a> Parser<'a> {
 
         let range = self.expect_range(start, Token::RCurly)?;
 
+        let returns = self.push_id_vec(self.returns.clone());
         let func = self.push_node(
             range,
             Node::Func {
@@ -1428,6 +1466,8 @@ impl<'a> Parser<'a> {
                 params,
                 return_ty,
                 stmts,
+                returns,
+                is_macro,
             },
         );
 
@@ -1521,7 +1561,7 @@ impl<'a> Parser<'a> {
         self.lexer.original_source[range.start.char_offset..range.end.char_offset].to_string()
     }
 
-    pub fn id_vec(&self, idv: IdVec) -> &IdVecB {
+    pub fn id_vec(&self, idv: IdVec) -> &Vec<Id> {
         &self.id_vecs[idv.0]
     }
 }

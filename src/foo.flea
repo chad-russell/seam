@@ -8,44 +8,55 @@ fn main() i64 {
     // return call(id, 10);
 
     // return test_fn_ptr();
-    return cpi_test();
+    // return cpi_test();
     // return baz();
     // return bar();
     // return test_load_param();
+
+    foo();
+    return 4;
 }
 
-struct Point {
-    x: i64,
-    y: i64,
+macro foo() {
+    #insert {
+        let a = 3;
+    }
+
+    return {};
 }
 
-struct Line {
-    start: *Point,
-    end: *Point,
-}
+// struct Point {
+//     x: i64,
+//     y: i64,
+// }
 
-struct Foo {
-    value: i64,
-    bar: *Bar,
-}
+// struct Line {
+//     start: *Point,
+//     end: *Point,
+// }
 
-struct Bar {
-    value: i64,
-    baz: *Baz,
-}
+// struct Foo {
+//     value: i64,
+//     bar: *Bar,
+// }
 
-struct Baz {
-    value: i64,
-    qux: *Qux,
-}
+// struct Bar {
+//     value: i64,
+//     baz: *Baz,
+// }
 
-struct Qux {
-    value: **i64,
-}
+// struct Baz {
+//     value: i64,
+//     qux: *Qux,
+// }
 
-struct Poly!(T: Type) {
-    val: T,
-}
+// struct Qux {
+//     value: **i64,
+// }
+
+// struct Poly!(T: Type) {
+//     val: T,
+// }
 
 // fn test_poly1() i64 {
 //     let p: Point = {x: 3, y: 4};
@@ -117,30 +128,30 @@ struct Poly!(T: Type) {
 //     return f(2);
 // }
 
-fn cpi_test() i64 {
-    let foo: Foo = ---;
-    let bar: Bar = ---;
-    let baz: Baz = ---;
-    let qux: Qux = ---;
+// fn cpi_test() i64 {
+//     let foo: Foo = ---;
+//     let bar: Bar = ---;
+//     let baz: Baz = ---;
+//     let qux: Qux = ---;
 
-    foo.value = 111;
-    bar.value = 222;
-    baz.value = 333;
-    qux.value = &&444;
+//     foo.value = 111;
+//     bar.value = 222;
+//     baz.value = 333;
+//     qux.value = &&444;
 
-    baz.qux = &qux;
-    bar.baz = &baz;
-    foo.bar = &bar;
+//     baz.qux = &qux;
+//     bar.baz = &baz;
+//     foo.bar = &bar;
 
-    ^bar.baz.qux.value = &7;
+//     ^bar.baz.qux.value = &7;
 
-    // assert(3 == ^^foo.bar.baz.qux.value);
-    // assert(3 == ^^bar.baz.qux.value);
-    // assert(3 == ^^baz.qux.value);
-    // assert(3 == ^^qux.value);
+//     // assert(3 == ^^foo.bar.baz.qux.value);
+//     // assert(3 == ^^bar.baz.qux.value);
+//     // assert(3 == ^^baz.qux.value);
+//     // assert(3 == ^^qux.value);
 
-    return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
-}
+//     return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
+// }
     
 // fn test_load_param() i64 {
 //     return load_wrapper(&&10);

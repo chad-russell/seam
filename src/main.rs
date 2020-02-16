@@ -1,9 +1,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-#[macro_use(defer)]
-extern crate scopeguard;
-
 mod backend;
 mod parser;
 mod semantic;
@@ -14,7 +11,8 @@ use parser::CompileError;
 fn main() -> Result<(), CompileError> {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
 
-    let backend = Backend::bootstrap_from_source(&source)?;
+    let semantic = Backend::bootstrap_to_semantic(&source)?;
+    let backend = Backend::bootstrap_to_backend(&semantic)?;
 
     let now = std::time::Instant::now();
     dbg!(backend.call_func("main"));

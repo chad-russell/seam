@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
 use crate::semantic::Semantic;
 
 use cranelift::codegen::ir::{FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind};
@@ -10,7 +10,6 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 
 use std::collections::BTreeMap;
-use std::convert::TryInto;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
@@ -29,6 +28,7 @@ unsafe impl Sync for FuncPtr {}
 const ENUM_TAG_SIZE_BYTES: u32 = 2;
 
 // todo(chad): replace with evmap or similar?
+// todo(chad): this doesn't have to be global if `dynamic_fn_ptr` function takes a `*Backend` parameter
 lazy_static! {
     pub static ref FUNC_PTRS: Arc<Mutex<BTreeMap<Sym, FuncPtr>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
@@ -99,16 +99,16 @@ impl Value {
     }
 }
 
-pub struct Backend<'a> {
-    pub semantic: Semantic<'a>,
+pub struct Backend<'a, 'b> {
+    pub semantic: &'a Semantic<'b>,
     func_ctx: FunctionBuilderContext,
     pub values: Vec<Value>,
     funcs: BTreeMap<Sym, FuncId>,
     func_sigs: BTreeMap<Sym, Signature>,
 }
 
-impl<'a> Backend<'a> {
-    pub fn new(semantic: Semantic<'a>) -> Self {
+impl<'a, 'b> Backend<'a, 'b> {
+    pub fn new(semantic: &'a Semantic<'b>) -> Self {
         let func_ctx = FunctionBuilderContext::new();
         let len = semantic.types.len();
 
@@ -143,7 +143,7 @@ impl<'a> Backend<'a> {
     //     Ok(())
     // }
 
-    pub fn bootstrap_from_source(source: &str) -> Result<Backend, CompileError> {
+    pub fn bootstrap_to_semantic(source: &str) -> Result<Semantic, CompileError> {
         FUNC_PTRS.lock().unwrap().clear();
 
         let now = std::time::Instant::now();
@@ -156,17 +156,27 @@ impl<'a> Backend<'a> {
         );
 
         let mut semantic = Semantic::new(parser);
+        let now = std::time::Instant::now();
         semantic.assign_top_level_types()?;
         let elapsed = now.elapsed();
         println!(
-            "parser + semantic ran in: {}",
+            "semantic ran in: {}",
             elapsed.as_micros() as f64 / 1_000_000.0
         );
 
+        Ok(semantic)
+    }
+
+    pub fn bootstrap_to_backend<'x, 'y>(
+        semantic: &'x Semantic<'y>,
+    ) -> Result<Backend<'x, 'y>, CompileError> {
         let mut backend = Backend::new(semantic);
+
+        let now = std::time::Instant::now();
         backend.compile()?;
+        let elapsed = now.elapsed();
         println!(
-            "parser + semantic + backend ran in: {}",
+            "backend ran in: {}",
             elapsed.as_micros() as f64 / 1_000_000.0
         );
 
@@ -218,15 +228,15 @@ impl<'a> Backend<'a> {
             .unwrap()
     }
 
-    pub fn call_func(&self, str: &str) -> i32 {
+    pub fn call_func(&self, str: &str) -> i64 {
         // dbg!(FUNC_PTRS
         //     .lock()
         //     .unwrap()
         //     .keys()
         //     .map(|k| self.semantic.parser.lexer.resolve_unchecked(*k))
         //     .collect::<Vec<_>>());
-        let f: fn() -> i32 = unsafe {
-            std::mem::transmute::<_, fn() -> i32>(
+        let f: fn() -> i64 = unsafe {
+            std::mem::transmute::<_, fn() -> i64>(
                 (FUNC_PTRS.lock().unwrap())
                     [&self.semantic.parser.lexer.string_interner.get(str).unwrap()],
             )
@@ -252,15 +262,17 @@ impl<'a> Backend<'a> {
         match &self.semantic.parser.nodes[id] {
             Node::Func {
                 name,      // Sym,
-                params,    // Vec<Id>,
+                params,    // IdVec,
                 return_ty, // Id,
-                stmts,     // Vec<Id>,
+                stmts,     // IdVec,
+                is_macro,
                 ..
             } => {
                 // todo(chad): find a way to reuse these
                 let mut module: Module<SimpleJITBackend> = {
                     let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
                     jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
+                    jit_builder.symbol("__macro_insert", macro_insert as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
                     }
@@ -285,16 +297,27 @@ impl<'a> Backend<'a> {
 
                 self.values[id] = Value::FuncRef(func_sym);
 
-                // println!("compiling func {}", func_name);
+                println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
+                if *is_macro {
+                    // macros always take a pointer to a `Semantic` as their first parameter
+                    sig.params.push(AbiParam::new(types::I64));
+                }
                 for param in self.semantic.parser.id_vec(*params) {
                     sig.params
-                        .push(AbiParam::new(self.get_cranelift_type(*param)?));
+                        .push(AbiParam::new(into_cranelift_type(&self.semantic, *param)?));
                 }
-                sig.returns
-                    .push(AbiParam::new(self.get_cranelift_type(*return_ty)?));
+
+                let return_size = type_size(&self.semantic, &module, *return_ty);
+                if return_size > 0 {
+                    sig.returns.push(AbiParam::new(into_cranelift_type(
+                        &self.semantic,
+                        *return_ty,
+                    )?));
+                }
+
                 ctx.func.signature = sig;
 
                 self.func_sigs.insert(func_sym, ctx.func.signature.clone());
@@ -326,12 +349,29 @@ impl<'a> Backend<'a> {
                     module.declare_func_in_func(dfp_func_id, &mut builder.func)
                 };
 
+                let insert_decl = {
+                    let mut ins_sig = module.make_signature();
+
+                    ins_sig.params.push(AbiParam::new(types::I64));
+                    ins_sig.params.push(AbiParam::new(types::I64));
+                    ins_sig
+                        .returns
+                        .push(AbiParam::new(module.isa().pointer_type()));
+
+                    let ins_func_id = module
+                        .declare_function("__macro_insert", Linkage::Import, &ins_sig)
+                        .unwrap();
+
+                    module.declare_func_in_func(ins_func_id, &mut builder.func)
+                };
+
                 let mut fb = FunctionBackend {
                     semantic: &self.semantic,
                     values: &mut self.values,
                     builder: &mut builder,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
+                    insert_decl,
                     module: &mut module,
                 };
                 for stmt in self.semantic.parser.id_vec(*stmts) {
@@ -364,21 +404,22 @@ impl<'a> Backend<'a> {
         }
     }
 
-    fn get_cranelift_type(&self, id: Id) -> Result<types::Type, CompileError> {
-        get_cranelift_type(&self.semantic, id)
-    }
+    // fn get_cranelift_type(&self, id: Id) -> Result<types::Type, CompileError> {
+    //     get_cranelift_type(&self.semantic, id)
+    // }
 }
 
-fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
-    let range = semantic.parser.ranges[id];
+// fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
+//     let range = semantic.parser.ranges[id];
 
-    semantic
-        .types
-        .get(id)
-        .ok_or(CompileError::from_string("Type not found", range))?
-        .try_into()
-        .map_err(|e| CompileError::from_string(String::from(e), range))
-}
+//     let ty = semantic
+//         .types
+//         .get(id)
+//         .ok_or(CompileError::from_string("Type not found", range))?;
+
+//         .try_into()
+//         .map_err(|e| CompileError::from_string(String::from(e), range))
+// }
 
 struct FunctionBackend<'a, 'b, 'c> {
     semantic: &'a Semantic<'b>,
@@ -386,6 +427,7 @@ struct FunctionBackend<'a, 'b, 'c> {
     builder: &'a mut Builder<'c>,
     current_block: Ebb,
     dynamic_fn_ptr_decl: FuncRef,
+    insert_decl: FuncRef,
     module: &'a mut Module<SimpleJITBackend>,
 }
 
@@ -394,48 +436,9 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         self.values[id] = Value::Value(value);
     }
 
-    fn type_size(&self, id: Id) -> u32 {
-        match &self.semantic.types[id] {
-            Type::Basic(BasicType::None) => 0,
-            Type::Basic(BasicType::Bool) => 4,
-            Type::Basic(BasicType::I8) => 1,
-            Type::Basic(BasicType::I16) => 2,
-            Type::Basic(BasicType::I32) => 4,
-            Type::Basic(BasicType::I64) => 8,
-            Type::Basic(BasicType::F32) => 4,
-            Type::Basic(BasicType::F64) => 8,
-            Type::Pointer(_) => self.module.isa().pointer_bytes() as _,
-            Type::Func { .. } => self.module.isa().pointer_bytes() as _,
-            Type::Struct { params, .. } => self
-                .semantic
-                .parser
-                .id_vec(*params)
-                .iter()
-                .map(|p| self.type_size(*p))
-                .sum(),
-            Type::Enum { params, .. } => {
-                let biggest_param = self
-                    .semantic
-                    .parser
-                    .id_vec(*params)
-                    .iter()
-                    .map(|p| self.type_size(*p))
-                    .max()
-                    .unwrap_or(0);
-                let tag_size = ENUM_TAG_SIZE_BYTES;
-                tag_size + biggest_param
-            }
-            _ => todo!(
-                "type_size for {:?} ({})",
-                &self.semantic.types[id],
-                self.semantic.parser.debug(id)
-            ),
-        }
-    }
-
     // Returns whether the value for a particular id is the value itself, or a pointer to the value
     // For instance, the constant integer 3 would likely be just the value, and not a pointer.
-    // However a field access (or even a load) needs to always be returned by pointer, because it might refer to a struct literal
+    // However a field access (or even a load) needs to always be returned by pointer, because it might refer to a struct literal.
     // Some nodes (like const int above) don't usually return a pointer, but they might need to for other reasons,
     // e.g. they need their address to be taken. In that case we store that fact in the 'node_has_slot' vec.
     // Also symbols won't know whether they have a local or not because it depends what they're referencing. So 'node_has_slot' is handy there too.
@@ -507,7 +510,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn store_copy(&mut self, id: Id, dest: &Value) {
-        let size = self.type_size(id);
+        let size = type_size(&self.semantic, &self.module, id);
 
         let source_value = self.as_value(id);
         let dest_value = dest.as_value_relaxed(self);
@@ -530,7 +533,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             let ty = match ty {
                 Type::Struct { .. } => self.module.isa().pointer_type(),
                 Type::Enum { .. } => self.module.isa().pointer_type(),
-                _ => ty.try_into().unwrap(),
+                _ => into_cranelift_type(&self.semantic, id).unwrap(),
             };
 
             match &self.values[id] {
@@ -556,7 +559,12 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let value = self.rvalue(return_id);
                 self.values[id] = Value::Value(value);
 
-                self.builder.ins().return_(&[value]);
+                let return_size = type_size(&self.semantic, &self.module, return_id);
+                if return_size > 0 {
+                    self.builder.ins().return_(&[value]);
+                } else {
+                    self.builder.ins().return_(&[]);
+                }
 
                 Ok(())
             }
@@ -579,7 +587,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 self.set_value(id, value);
 
                 if self.semantic.parser.node_is_addressable[id] {
-                    let size = self.type_size(id);
+                    let size = type_size(&self.semantic, &self.module, id);
                     let slot = self.builder.create_stack_slot(StackSlotData {
                         kind: StackSlotKind::ExplicitSlot,
                         size,
@@ -610,7 +618,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                         assert_eq!(params.len(), 1);
                         let param = params[0];
-                        let size = self.type_size(param) + ENUM_TAG_SIZE_BYTES;
+                        let size =
+                            type_size(&self.semantic, &self.module, param) + ENUM_TAG_SIZE_BYTES;
 
                         let slot = self.builder.create_stack_slot(StackSlotData {
                             kind: StackSlotKind::ExplicitSlot,
@@ -650,7 +659,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 // todo(chad): @Optimization: this is about the slowest thing we could ever do, but works great.
                 // Come back later once everything is working and make it fast
-                let size = self.type_size(id);
+                let size = type_size(&self.semantic, &self.module, id);
                 let slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
@@ -667,7 +676,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 for param in self.semantic.parser.id_vec(params) {
                     self.compile_id(*param)?;
                     self.store_with_offset(*param, &Value::Value(addr), offset);
-                    offset += self.type_size(*param) as i32;
+                    offset += type_size(&self.semantic, &self.module, *param) as i32;
                 }
 
                 Ok(())
@@ -696,7 +705,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 ty: _,   // Id
                 expr,    // Id
             } => {
-                let size = self.type_size(id);
+                let size = type_size(&self.semantic, &self.module, id);
                 let slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
@@ -756,72 +765,25 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::Call {
-                name,         // Id
-                ct_params: _, // Vec<Id>
-                params,       // Vec<Id>
-                is_indirect: _,
+                name,        // Id
+                params,      // IdVec
+                is_macro,    // bool
+                macro_stmts, // IdVec
+                ..
             } => {
-                // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
-
-                self.compile_id(name)?;
-                for param in self.semantic.parser.id_vec(params) {
-                    self.compile_id(*param)?;
-                }
-
-                let cranelift_param = match &self.values[name] {
-                    Value::FuncRef(fr) => {
-                        self.builder.ins().iconst(types::I64, fr.to_usize() as i64)
+                if is_macro {
+                    for &stmt in self.semantic.parser.id_vec(macro_stmts) {
+                        self.compile_id(stmt)?;
                     }
-                    Value::Value(_) => self.rvalue(name),
-                    _ => unreachable!("unrecognized Value type in codegen Node::Call"),
-                };
 
-                let call_inst = self
-                    .builder
-                    .ins()
-                    .call(self.dynamic_fn_ptr_decl, &[cranelift_param]);
-                let value = self.builder.func.dfg.inst_results(call_inst)[0];
-
-                // Now call indirect
-                let func_ty = self.semantic.types[name];
-                let return_ty = match func_ty {
-                    Type::Func { return_ty, .. } => Some(return_ty),
-                    _ => None,
+                    Ok(())
+                } else {
+                    let params = self.semantic.parser.id_vec(params);
+                    self.compile_call(id, name, params)
                 }
-                .unwrap();
-
-                let mut sig = self.module.make_signature();
-                for param in self.semantic.parser.id_vec(params) {
-                    sig.params
-                        .push(AbiParam::new(get_cranelift_type(&self.semantic, *param)?));
-                }
-
-                sig.returns.push(AbiParam::new(get_cranelift_type(
-                    &self.semantic,
-                    return_ty,
-                )?));
-
-                let cranelift_params = self
-                    .semantic
-                    .parser
-                    .id_vec(params)
-                    .iter()
-                    .map(|param| self.rvalue(*param))
-                    .collect::<Vec<_>>();
-
-                let sig = self.builder.import_signature(sig);
-                let call_inst = self
-                    .builder
-                    .ins()
-                    .call_indirect(sig, value, &cranelift_params);
-
-                let value = self.builder.func.dfg.inst_results(call_inst)[0];
-                self.set_value(id, value);
-
-                Ok(())
             }
             // Node::If(cond_id, true_id, false_id) => {
-            //     let size = self.type_size(id);
+            //     let size = type_size(id);
             //     let slot = self.builder.create_stack_slot(StackSlotData {
             //         kind: StackSlotKind::ExplicitSlot,
             //         size,
@@ -908,7 +870,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 let ty = &self.semantic.types[id];
                 let ty = match ty {
                     Type::Struct { .. } => self.module.isa().pointer_type(),
-                    _ => ty.try_into().unwrap(),
+                    _ => into_cranelift_type(&self.semantic, id)?,
                 };
 
                 let loaded = self.builder.ins().load(ty, MemFlags::new(), value, 0);
@@ -973,7 +935,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                             _ => unreachable!(),
                         })
                         .take(field_index as usize)
-                        .map(|ty| self.type_size(ty))
+                        .map(|ty| type_size(&self.semantic, &self.module, ty))
                         .sum::<u32>()
                 };
 
@@ -1007,6 +969,31 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
+            Node::Insert(stmts) => {
+                // When this macro runs, we want to tell the compiler to insert the statements.
+                // We accomplish that by generating a function call
+
+                // let mut sig = self.module.make_signature();
+                // sig.params.push(AbiParam::new(types::I64));
+                // sig.returns.push(AbiParam::new(types::I64));
+                // let sig = self.builder.import_signature(sig);
+
+                let self_ptr = self as *const FunctionBackend as i64;
+                // println!("sending {}", self_ptr);
+
+                let current_fn_params = self.builder.ebb_params(self.current_block);
+                let cranelift_params = &[
+                    current_fn_params[0],
+                    self.builder.ins().iconst(types::I64, stmts.0 as i64),
+                ];
+
+                let call_inst = self.builder.ins().call(self.insert_decl, cranelift_params);
+
+                let value = self.builder.func.dfg.inst_results(call_inst)[0];
+                self.set_value(id, value);
+
+                Ok(())
+            }
             Node::TypeLiteral(_) => {
                 self.values[id] = Value::None;
                 Ok(())
@@ -1021,31 +1008,151 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             )),
         }
     }
+
+    fn compile_call(&mut self, id: Id, name: Id, params: &Vec<Id>) -> Result<(), CompileError> {
+        // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
+
+        self.compile_id(name)?;
+        for param in params {
+            self.compile_id(*param)?;
+        }
+
+        let cranelift_param = match &self.values[name] {
+            Value::FuncRef(fr) => self.builder.ins().iconst(types::I64, fr.to_usize() as i64),
+            Value::Value(_) => self.rvalue(name),
+            _ => unreachable!("unrecognized Value type in codegen Node::Call"),
+        };
+
+        let call_inst = self
+            .builder
+            .ins()
+            .call(self.dynamic_fn_ptr_decl, &[cranelift_param]);
+        let value = self.builder.func.dfg.inst_results(call_inst)[0];
+
+        // Now call indirect
+        let func_ty = self.semantic.types[name];
+        let return_ty = match func_ty {
+            Type::Func { return_ty, .. } => Some(return_ty),
+            _ => None,
+        }
+        .unwrap();
+
+        let mut sig = self.module.make_signature();
+        for param in params.iter() {
+            sig.params
+                .push(AbiParam::new(into_cranelift_type(&self.semantic, *param)?));
+        }
+
+        let return_size = type_size(&self.semantic, &self.module, return_ty);
+        if return_size > 0 {
+            sig.returns.push(AbiParam::new(into_cranelift_type(
+                &self.semantic,
+                return_ty,
+            )?));
+        }
+
+        let cranelift_params = params
+            .iter()
+            .map(|param| self.rvalue(*param))
+            .collect::<Vec<_>>();
+
+        let sig = self.builder.import_signature(sig);
+        let call_inst = self
+            .builder
+            .ins()
+            .call_indirect(sig, value, &cranelift_params);
+
+        if return_size > 0 {
+            let value = self.builder.func.dfg.inst_results(call_inst)[0];
+            self.set_value(id, value);
+        }
+
+        Ok(())
+    }
 }
 
-impl TryInto<types::Type> for &Type {
-    type Error = String;
+fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
+    let range = semantic.parser.ranges[id];
+    let ty = &semantic.types[id];
 
-    fn try_into(self) -> Result<types::Type, String> {
-        match self {
-            &Type::Basic(bt) => match bt {
-                BasicType::Bool => Ok(types::I32), // todo(chad): I8?
-                BasicType::I8 => Ok(types::I8),
-                BasicType::I16 => Ok(types::I16),
-                BasicType::I32 => Ok(types::I32),
-                BasicType::I64 => Ok(types::I64),
-                BasicType::F32 => Ok(types::F32),
-                BasicType::F64 => Ok(types::F64),
-                _ => Err(format!("Could not convert type {:?}", &self)),
-            },
-            &Type::Func { .. } => Ok(types::I64),
-            &Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
-            _ => Err(format!("Could not convert type {:?}", &self)),
+    match ty {
+        Type::Basic(bt) => match bt {
+            BasicType::Bool => Ok(types::I32), // todo(chad): I8?
+            BasicType::I8 => Ok(types::I8),
+            BasicType::I16 => Ok(types::I16),
+            BasicType::I32 => Ok(types::I32),
+            BasicType::I64 => Ok(types::I64),
+            BasicType::F32 => Ok(types::F32),
+            BasicType::F64 => Ok(types::F64),
+            _ => Err(CompileError::from_string(
+                format!("Could not convert type {:?}", ty),
+                range,
+            )),
+        },
+        Type::Func { .. } => Ok(types::I64),
+        Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
+        Type::Struct { params, .. } if semantic.parser.id_vec(*params).len() == 0 => unreachable!(),
+        _ => Err(CompileError::from_string(
+            format!("Could not convert type {:?}", ty),
+            range,
+        )),
+    }
+}
+
+fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id) -> u32 {
+    match &semantic.types[id] {
+        Type::Basic(BasicType::None) => 0,
+        Type::Basic(BasicType::Bool) => 4,
+        Type::Basic(BasicType::I8) => 1,
+        Type::Basic(BasicType::I16) => 2,
+        Type::Basic(BasicType::I32) => 4,
+        Type::Basic(BasicType::I64) => 8,
+        Type::Basic(BasicType::F32) => 4,
+        Type::Basic(BasicType::F64) => 8,
+        Type::Pointer(_) => module.isa().pointer_bytes() as _,
+        Type::Func { .. } => module.isa().pointer_bytes() as _,
+        Type::Struct { params, .. } => semantic
+            .parser
+            .id_vec(*params)
+            .iter()
+            .map(|p| type_size(semantic, module, *p))
+            .sum(),
+        Type::Enum { params, .. } => {
+            let biggest_param = semantic
+                .parser
+                .id_vec(*params)
+                .iter()
+                .map(|p| type_size(semantic, module, *p))
+                .max()
+                .unwrap_or(0);
+            let tag_size = ENUM_TAG_SIZE_BYTES;
+            tag_size + biggest_param
         }
+        _ => todo!(
+            "type_size for {:?} ({})",
+            &semantic.types[id],
+            semantic.parser.debug(id)
+        ),
     }
 }
 
 // todo(chad): this would be dynamically generated/cached on the fly for the real version, so we could handle any combination of arguments
 fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
+}
+
+fn macro_insert(semantic: *mut Semantic, stmts: Id) {
+    let semantic: &Semantic = unsafe { std::mem::transmute(semantic) };
+    let stmts = IdVec(stmts);
+
+    println!("****");
+    println!(
+        "inserting stmts for current macro expansion context: {:?}",
+        stmts
+    );
+
+    for stmt in semantic.parser.id_vec(stmts) {
+        println!("inserting statement :: {}", semantic.parser.debug(*stmt));
+    }
+    println!();
 }

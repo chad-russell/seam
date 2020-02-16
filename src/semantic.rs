@@ -2,26 +2,15 @@ use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 
 type Sym = usize;
 
-use smallvec::SmallVec;
-
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
-
-#[derive(Debug, Clone, Copy)]
-enum Coercion {
-    None,
-    Id(Id),
-}
 
 pub struct Semantic<'a> {
     pub parser: Parser<'a>,
     pub types: Vec<Type>,
     pub topo: Vec<Id>,
-    // todo(chad): probably not a big deal, but try to find a workaround
-    pub function_return_tys: Rc<RefCell<Vec<Id>>>,
     pub lhs_assign: bool,
     pub type_matches: Vec<Vec<Id>>,
+    pub macro_phase: bool,
 }
 
 impl<'a> Semantic<'a> {
@@ -31,25 +20,65 @@ impl<'a> Semantic<'a> {
             parser,
             types,
             topo: Vec::new(),
-            function_return_tys: Rc::new(RefCell::new(Vec::new())),
             lhs_assign: false,
             type_matches: Vec::new(),
+            macro_phase: false,
         }
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
+        self.macro_phase = true;
+
         for mac in self.parser.macros.clone() {
-            todo!("macros");
+            self.assign_type(mac)?;
+
+            let mut backend = crate::Backend::new(self);
+            backend.compile()?;
+
+            // dbg!(backend.call_func("foo"));
+            // panic!("WE DID A THING");
         }
 
+        for &call in self.parser.calls.iter() {
+            let (name, _params) = match self.parser.nodes[call] {
+                // todo(chad): disallow generic macros?
+                Node::Call { name, params, .. } => (name, params),
+                _ => unreachable!(),
+            };
+
+            // todo(chad): evaluate params to const values
+
+            let resolved_func = self.resolve(name)?;
+            match &self.parser.nodes[resolved_func] {
+                Node::Func { name, is_macro, .. } if *is_macro => {
+                    // call macro
+                    let f: fn(*const Semantic) = unsafe {
+                        std::mem::transmute::<_, fn(*const Semantic)>(
+                            (crate::backend::FUNC_PTRS.lock().unwrap())[name],
+                        )
+                    };
+
+                    f(self as _);
+                }
+                _ => (),
+            }
+        }
+
+        self.macro_phase = false;
+        self.topo.clear();
+
         for tl in self.parser.top_level.clone() {
-            let is_poly = match &self.parser.nodes[tl] {
-                Node::Func { ct_params, .. } => ct_params.is_some(),
+            let is_poly_or_macro = match &self.parser.nodes[tl] {
+                Node::Func {
+                    ct_params,
+                    is_macro,
+                    ..
+                } => ct_params.is_some() || *is_macro,
                 Node::Struct { ct_params, .. } => ct_params.is_some(),
                 _ => false,
             };
 
-            if !is_poly {
+            if !is_poly_or_macro {
                 self.assign_type(tl)?
             }
         }
@@ -277,11 +306,15 @@ impl<'a> Semantic<'a> {
             Node::Func {
                 name: _,   // Sym,
                 scope: _,  // Id,
-                ct_params, // Vec<Id>,
-                params,    // Vec<Id>,
+                ct_params, // IdVec,
+                params,    // IdVec,
                 return_ty, // Id,
-                stmts,     // Vec<Id>,
+                stmts,     // IdVec,
+                returns,   // IdVec,
+                is_macro,  // bool,
             } => {
+                if is_macro && !self.macro_phase { return Ok(()); }
+
                 if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
                         self.assign_type(ct_param)?;
@@ -289,12 +322,6 @@ impl<'a> Semantic<'a> {
                 }
 
                 self.assign_type(return_ty)?;
-
-                let function_return_tys = self.function_return_tys.clone();
-                function_return_tys.borrow_mut().push(return_ty);
-                defer! {{
-                    function_return_tys.borrow_mut().pop();
-                }};
 
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
@@ -309,6 +336,15 @@ impl<'a> Semantic<'a> {
                 for stmt in self.parser.id_vec(stmts).clone() {
                     self.assign_type(stmt)?;
                     self.unify_types()?;
+                }
+
+                for ret_id in self.parser.id_vec(returns).clone() {
+                    let ret_id = match self.parser.nodes[ret_id] {
+                        Node::Return(id) => id,
+                        _ => unreachable!()
+                    };
+
+                    self.match_types(return_ty, ret_id);
                 }
 
                 self.topo.push(id);
@@ -427,9 +463,21 @@ impl<'a> Semantic<'a> {
                 name,
                 ct_params,
                 params,
-                is_indirect: _,
+                is_macro: _,
+                ..
             } => {
                 let resolved_func = self.resolve(name)?;
+
+                let is_macro_call = match self.parser.nodes.get_mut(resolved_func).unwrap() {
+                    Node::Func { is_macro, .. } => *is_macro,
+                    _ => false
+                };
+                if is_macro_call {
+                    match self.parser.nodes.get_mut(id).unwrap() {
+                        Node::Call { is_macro, .. } => *is_macro = true,
+                        _ => unreachable!()
+                    }
+                }
 
                 let is_ct = match &self.parser.nodes[resolved_func] {
                     Node::Func { ct_params, .. } => ct_params.is_some(),
@@ -466,14 +514,14 @@ impl<'a> Semantic<'a> {
                     // match given ct_params against declared ct_params
                     let given = ct_params
                         .map(|p| self.parser.id_vec(p).clone())
-                        .unwrap_or(SmallVec::new());
+                        .unwrap_or(Vec::new());
                     let decl = match &self.parser.nodes[resolved_func] {
                         Node::Func { ct_params, .. } => ct_params,
                         _ => unreachable!(),
                     };
                     let decl = decl
                         .map(|p| self.parser.id_vec(p).clone())
-                        .unwrap_or(SmallVec::new());
+                        .unwrap_or(Vec::new());
 
                     for (g, d) in given.iter().zip(decl.iter()) {
                         self.assign_type(*d)?;
@@ -548,7 +596,10 @@ impl<'a> Semantic<'a> {
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
                 }
-                self.types[id] = Type::Enum { params: params.clone(), copied_from: None, }; 
+                self.types[id] = Type::Enum { params: params.clone(), copied_from: None, };
+                Ok(())
+            }
+            Node::Insert(_) => {
                 Ok(())
             }
             // _ => Err(CompileError::from_string(
