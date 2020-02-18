@@ -21,22 +21,34 @@
   - [ ] support `.tag` pseudo-property
   - [ ] check enum tag when accessing through a field
 - [x] let binding type inference
+- [ ] #insert scope issue:
+  - #insert stmts need their own scope.
+  - when parsing unquotes inside of a #insert block, the scope needs to be the outer scope that the #insert block is in, and NOT the inner scope of the #insert block.
 - [ ] generics
   - [x] for functions
   - [x] for structs
   - [ ] for enums
   - [x] copy functions/structs when instantiating so we can do multiple
   - [ ] baking
+  - [ ] non-type (constant value) params
   - [x] check conflicts during unification
 - [x] (mutually) recursive structs / functions
 - [ ] compile-time functions -> macros
-- [ ] return type inference (`fn foo() { return 3; }` should infer return type i64)
+  - [x] arbitrary compile-time parameters (need to have support for constant values, and build a function hoisting platform)
+  - [x] unquote
+  - [ ] #code parameters
+- [ ] structs as function parameters / return values
+  - [ ] structs as compile-time parameters / return values
+  - [ ] follow C ABI, at least for extern functions
+- [ ] first-class types
+- [ ] arrays
+- [x] return type inference (`fn foo() { return 3; }` should infer return type i64)
+- [ ] defer
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
-- [ ] more math
+- [ ] math (binary operations)
 - [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
-- [ ] structs as function parameters / return values
-  - [ ] follow C ABI, at least for extern functions
-- [ ] arrays
+- [ ] if
 - [ ] while
+- [ ] for (with macros?)
 - [ ] f32/f64

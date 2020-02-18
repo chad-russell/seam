@@ -11,8 +11,8 @@ use parser::CompileError;
 fn main() -> Result<(), CompileError> {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
 
-    let semantic = Backend::bootstrap_to_semantic(&source)?;
-    let backend = Backend::bootstrap_to_backend(&semantic)?;
+    let mut semantic = Backend::bootstrap_to_semantic(&source)?;
+    let backend = Backend::bootstrap_to_backend(&mut semantic)?;
 
     let now = std::time::Instant::now();
     dbg!(backend.call_func("main"));

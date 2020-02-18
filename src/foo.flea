@@ -1,4 +1,4 @@
-fn main() i64 {
+fn main() i32 {
     // return poly_call(id, 15);
     // return poly_call(poly_id, 99);
     // return poly_omg(poly_call, poly_id, 10);
@@ -13,13 +13,13 @@ fn main() i64 {
     // return bar();
     // return test_load_param();
 
-    foo();
+    test_macro(#code { let a = 10; });
     return a;
 }
 
-macro foo() {
+macro test_macro(c: #code) {
     #insert {
-        let a = 3;
+        \c
     }
 
     return {};

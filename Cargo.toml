@@ -10,7 +10,6 @@ cranelift = "0.56.0"
 cranelift-module = "0.56.0"
 cranelift-simplejit = "0.56.0"
 lazy_static = "1.4.0"
-crossbeam-utils = "0.7.0"
 
-[profile.release]
-debug = true
+# [profile.release]
+# debug = true

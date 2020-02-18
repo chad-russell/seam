@@ -1,3 +1,4 @@
+use crate::backend::Backend;
 use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 
 type Sym = usize;
@@ -12,6 +13,7 @@ pub struct Semantic<'a> {
     pub type_matches: Vec<Vec<Id>>,
     pub macro_phase: bool,
     pub macro_expansion_site: Option<Id>, // todo(chad): make this just Id once we're confident it's always set
+    pub unquote_values: Vec<i64>,         // todo(chad): @ConstValue
 }
 
 impl<'a> Semantic<'a> {
@@ -25,48 +27,12 @@ impl<'a> Semantic<'a> {
             type_matches: Vec::new(),
             macro_phase: false,
             macro_expansion_site: None,
+            unquote_values: Vec::new(),
         }
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
-        self.macro_phase = true;
-
-        for mac in self.parser.macros.clone() {
-            self.assign_type(mac)?;
-
-            let mut backend = crate::Backend::new(self);
-            backend.compile()?;
-        }
-
-        for &call in self.parser.calls.iter() {
-            let (name, _params) = match self.parser.nodes[call] {
-                // todo(chad): disallow generic macros?
-                Node::Call { name, params, .. } => (name, params),
-                _ => unreachable!(),
-            };
-
-            // todo(chad): evaluate params to const values
-
-            let resolved_func = self.resolve(name)?;
-            match &self.parser.nodes[resolved_func] {
-                Node::Func { name, is_macro, .. } if *is_macro => {
-                    // call macro
-                    let f: fn(*const Semantic) = unsafe {
-                        std::mem::transmute::<_, fn(*const Semantic)>(
-                            (crate::backend::FUNC_PTRS.lock().unwrap())[name],
-                        )
-                    };
-
-                    self.macro_expansion_site = Some(call);
-
-                    f(self as _);
-                }
-                _ => (),
-            }
-        }
-
-        self.macro_phase = false;
-        self.topo.clear();
+        self.handle_macros()?;
 
         for tl in self.parser.top_level.clone() {
             let is_poly_or_macro = match &self.parser.nodes[tl] {
@@ -84,7 +50,7 @@ impl<'a> Semantic<'a> {
             }
         }
 
-        self.unify_types()?;
+        self.unify_types(true)?;
         if !self.type_matches.is_empty() && !self.type_matches[0].is_empty() {
             CompileError::from_string(
                 "Failed to unify types",
@@ -93,10 +59,85 @@ impl<'a> Semantic<'a> {
         }
 
         // for (index, ty) in self.types.iter().enumerate() {
-        //     if ty == &Type::Unassigned {
+        //     if !ty.is_concrete() {
         //         println!("Unassigned type for {}", self.parser.debug(index));
         //     }
         // }
+
+        Ok(())
+    }
+
+    fn handle_macros(&mut self) -> Result<(), CompileError> {
+        self.macro_phase = true;
+
+        let mut backend = Backend::new(self);
+        for mac in backend.semantic.parser.macros.clone() {
+            backend.semantic.assign_type(mac)?;
+            backend.compile()?;
+        }
+
+        // todo(chad): ugh clone... this one could actually be expensive...
+        for call in backend.semantic.parser.calls.clone() {
+            let (name, params) = match backend.semantic.parser.nodes[call] {
+                // todo(chad): disallow generic macros?
+                Node::Call { name, params, .. } => (name, params),
+                _ => unreachable!(),
+            };
+
+            let resolved_func = backend.semantic.resolve(name)?;
+            let is_macro = match &backend.semantic.parser.nodes[resolved_func] {
+                Node::Func { is_macro, .. } => *is_macro,
+                _ => false,
+            };
+
+            if !is_macro {
+                continue;
+            }
+
+            let (name, decl) = match &backend.semantic.parser.nodes[resolved_func] {
+                Node::Func { name, params, .. } => (*name, *params),
+                _ => unreachable!(),
+            };
+
+            // resolve any constant params
+            let given = backend.semantic.parser.id_vec(params).clone();
+            let decl = backend.semantic.parser.id_vec(decl).clone();
+
+            for (g, d) in given.iter().zip(decl.iter()) {
+                backend.semantic.assign_type(*d)?;
+                backend.semantic.assign_type(*g)?;
+                backend.semantic.match_types(*g, *d);
+            }
+
+            backend.semantic.unify_types(true)?;
+
+            let maybe_hoisted: *const u8 = if !given.is_empty() {
+                // todo(chad): build constant 'includes', i.e. what else has to be pulled into the hoisted fn to support the const param
+                backend.build_hoisted_function(given, name)?
+            } else {
+                (crate::backend::FUNC_PTRS.lock().unwrap())[&name].0
+            };
+
+            let f: fn(*const Semantic) = unsafe { std::mem::transmute(maybe_hoisted) };
+
+            backend.semantic.macro_expansion_site = Some(call);
+
+            backend.semantic.unquote_values.clear();
+            backend.semantic.parser.parsed_unquotes.clear();
+            f(backend.semantic as _);
+
+            // todo(chad): come up with a better theory of constant values
+            let unquotes = backend.semantic.parser.parsed_unquotes.clone();
+            let values = backend.semantic.unquote_values.clone();
+            for (unquote, value) in unquotes.iter().zip(values.iter()) {
+                let range = backend.semantic.parser.ranges[*unquote];
+                println!("VALUE: {}", *value);
+                backend.semantic.parser.nodes[*unquote] = Node::IntLiteral(*value);
+            }
+        }
+
+        self.macro_phase = false;
+        self.topo.clear();
 
         Ok(())
     }
@@ -267,7 +308,10 @@ impl<'a> Semantic<'a> {
                     self.assign_type(param)?;
                 }
 
-                self.types[id] = Type::Struct { params: params.clone(), copied_from: None };
+                self.types[id] = Type::Struct {
+                    params: params.clone(),
+                    copied_from: None,
+                };
 
                 Ok(())
             }
@@ -314,7 +358,9 @@ impl<'a> Semantic<'a> {
                 returns,   // IdVec,
                 is_macro,  // bool,
             } => {
-                if is_macro && !self.macro_phase { return Ok(()); }
+                if is_macro && !self.macro_phase {
+                    return Ok(());
+                }
 
                 if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
@@ -336,13 +382,13 @@ impl<'a> Semantic<'a> {
 
                 for stmt in self.parser.id_vec(stmts).clone() {
                     self.assign_type(stmt)?;
-                    self.unify_types()?;
+                    self.unify_types(false)?;
                 }
 
                 for ret_id in self.parser.id_vec(returns).clone() {
                     let ret_id = match self.parser.nodes[ret_id] {
                         Node::Return(id) => id,
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     };
 
                     self.match_types(return_ty, ret_id);
@@ -464,20 +510,24 @@ impl<'a> Semantic<'a> {
                 name,
                 ct_params,
                 params,
-                is_macro: _,
+                macro_stmts,
                 ..
             } => {
                 let resolved_func = self.resolve(name)?;
 
                 let is_macro_call = match self.parser.nodes.get_mut(resolved_func).unwrap() {
                     Node::Func { is_macro, .. } => *is_macro,
-                    _ => false
+                    _ => false,
                 };
                 if is_macro_call {
                     match self.parser.nodes.get_mut(id).unwrap() {
                         Node::Call { is_macro, .. } => *is_macro = true,
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     }
+                }
+
+                for stmt in self.parser.id_vec(macro_stmts).clone() {
+                    self.assign_type(stmt)?;
                 }
 
                 let is_ct = match &self.parser.nodes[resolved_func] {
@@ -552,7 +602,7 @@ impl<'a> Semantic<'a> {
                     Type::Func { return_ty, .. } => {
                         self.match_types(id, return_ty);
                     }
-                    _ => ()
+                    _ => (),
                 }
 
                 match self.types[name].clone() {
@@ -589,7 +639,10 @@ impl<'a> Semantic<'a> {
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
                 }
-                self.types[id] = Type::Struct { params: params.clone(), copied_from: copied, };
+                self.types[id] = Type::Struct {
+                    params: params.clone(),
+                    copied_from: copied,
+                };
 
                 Ok(())
             }
@@ -597,10 +650,28 @@ impl<'a> Semantic<'a> {
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
                 }
-                self.types[id] = Type::Enum { params: params.clone(), copied_from: None, };
+                self.types[id] = Type::Enum {
+                    params: params.clone(),
+                    copied_from: None,
+                };
                 Ok(())
             }
-            Node::Insert(_) => {
+            // Node::Code
+            Node::Unquote(unq) => {
+                self.assign_type(unq)?;
+                self.match_types(id, unq);
+
+                Ok(())
+            }
+            Node::Insert { unquotes, .. } => {
+                for unq in self.parser.id_vec(unquotes).clone() {
+                    self.assign_type(unq)?;
+                }
+
+                Ok(())
+            }
+            Node::Code(stmts) => {
+                todo!("handle Node::Code in semantic");
                 Ok(())
             }
             // _ => Err(CompileError::from_string(
@@ -652,7 +723,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_struct(&mut self, id: Id) -> Id {
-        println!("copying struct!");
+        // println!("copying struct!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -673,7 +744,7 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
-        println!("copying stmt!");
+        // println!("copying stmt!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -795,7 +866,7 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn unify_types(&mut self) -> Result<(), CompileError> {
+    fn unify_types(&mut self, final_pass: bool) -> Result<(), CompileError> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
@@ -813,27 +884,15 @@ impl<'a> Semantic<'a> {
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
-                .filter(|(ty, _)| self.types[*ty as usize].is_concrete())
+                .filter(|(ty, _)| {
+                    if final_pass {
+                        self.types[*ty as usize].is_concrete()
+                    } else {
+                        self.types[*ty as usize].is_coercble()
+                    }
+                })
                 .map(|(ty, _)| ty)
                 .collect::<Vec<_>>();
-
-            for &ty in tys.iter() {
-                let check_err = match (self.types[ty], self.types[tys[0]]) {
-                    (Type::Basic(_), _) => true,
-                    (_, Type::Basic(_)) => true,
-                    _ => false,
-                };
-
-                if check_err && self.types[ty] != self.types[tys[0]] {
-                    return Err(CompileError::from_string(
-                        format!(
-                            "Type unification failed for types {:?} and {:?}",
-                            &self.types[ty], &self.types[tys[0]]
-                        ),
-                        self.parser.ranges[ty],
-                    ));
-                }
-            }
 
             // set all types to whatever we unified to
             if let Some(&ty) = tys.first() {
@@ -854,6 +913,24 @@ impl<'a> Semantic<'a> {
                 }
 
                 to_clear.push(uid);
+            }
+
+            for &ty in tys.iter() {
+                let check_err = match (self.types[ty], self.types[tys[0]]) {
+                    (Type::Basic(_), _) => true,
+                    (_, Type::Basic(_)) => true,
+                    _ => false,
+                };
+
+                if check_err && self.types[ty] != self.types[tys[0]] {
+                    return Err(CompileError::from_string(
+                        format!(
+                            "Type unification failed for types {:?} and {:?}",
+                            &self.types[ty], &self.types[tys[0]]
+                        ),
+                        self.parser.ranges[ty],
+                    ));
+                }
             }
         }
 

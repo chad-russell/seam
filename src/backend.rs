@@ -35,7 +35,7 @@ lazy_static! {
 }
 
 pub struct Builder<'a> {
-    builder: FunctionBuilder<'a>,
+    pub builder: FunctionBuilder<'a>,
 }
 
 impl<'a> Deref for Builder<'a> {
@@ -79,12 +79,11 @@ impl Into<Value> for &CraneliftValue {
 
 impl Value {
     fn as_addr(&self) -> Value {
-        match self {
+        *match self {
             Value::Value(_) => Some(self),
             _ => None,
         }
         .unwrap()
-        .clone()
     }
 
     fn as_value_relaxed<'a, 'b, 'c>(
@@ -100,15 +99,15 @@ impl Value {
 }
 
 pub struct Backend<'a, 'b> {
-    pub semantic: &'a Semantic<'b>,
-    func_ctx: FunctionBuilderContext,
+    pub semantic: &'a mut Semantic<'b>,
+    pub func_ctx: FunctionBuilderContext,
     pub values: Vec<Value>,
-    funcs: BTreeMap<Sym, FuncId>,
-    func_sigs: BTreeMap<Sym, Signature>,
+    pub funcs: BTreeMap<Sym, FuncId>,
+    pub func_sigs: BTreeMap<Sym, Signature>,
 }
 
 impl<'a, 'b> Backend<'a, 'b> {
-    pub fn new(semantic: &'a Semantic<'b>) -> Self {
+    pub fn new(semantic: &'a mut Semantic<'b>) -> Self {
         let func_ctx = FunctionBuilderContext::new();
         let len = semantic.types.len();
 
@@ -146,39 +145,39 @@ impl<'a, 'b> Backend<'a, 'b> {
     pub fn bootstrap_to_semantic(source: &str) -> Result<Semantic, CompileError> {
         FUNC_PTRS.lock().unwrap().clear();
 
-        let now = std::time::Instant::now();
+        // let now = std::time::Instant::now();
         let mut parser = Parser::new(&source);
         parser.parse()?;
-        let elapsed = now.elapsed();
-        println!(
-            "parser ran in: {}",
-            elapsed.as_micros() as f64 / 1_000_000.0
-        );
+        // let elapsed = now.elapsed();
+        // println!(
+        //     "parser ran in: {}",
+        //     elapsed.as_micros() as f64 / 1_000_000.0
+        // );
 
         let mut semantic = Semantic::new(parser);
-        let now = std::time::Instant::now();
+        // let now = std::time::Instant::now();
         semantic.assign_top_level_types()?;
-        let elapsed = now.elapsed();
-        println!(
-            "semantic ran in: {}",
-            elapsed.as_micros() as f64 / 1_000_000.0
-        );
+        // let elapsed = now.elapsed();
+        // println!(
+        //     "semantic ran in: {}",
+        //     elapsed.as_micros() as f64 / 1_000_000.0
+        // );
 
         Ok(semantic)
     }
 
     pub fn bootstrap_to_backend<'x, 'y>(
-        semantic: &'x Semantic<'y>,
+        semantic: &'x mut Semantic<'y>,
     ) -> Result<Backend<'x, 'y>, CompileError> {
         let mut backend = Backend::new(semantic);
 
-        let now = std::time::Instant::now();
+        // let now = std::time::Instant::now();
         backend.compile()?;
-        let elapsed = now.elapsed();
-        println!(
-            "backend ran in: {}",
-            elapsed.as_micros() as f64 / 1_000_000.0
-        );
+        // let elapsed = now.elapsed();
+        // println!(
+        //     "backend ran in: {}",
+        //     elapsed.as_micros() as f64 / 1_000_000.0
+        // );
 
         Ok(backend)
     }
@@ -273,6 +272,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
                     jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
                     jit_builder.symbol("__macro_insert", macro_insert as *const u8);
+                    jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
                     }
@@ -301,13 +301,13 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 let mut sig = module.make_signature();
 
-                if *is_macro {
-                    // macros always take a pointer to a `Semantic` as their first parameter
-                    sig.params.push(AbiParam::new(types::I64));
-                }
                 for param in self.semantic.parser.id_vec(*params) {
                     sig.params
                         .push(AbiParam::new(into_cranelift_type(&self.semantic, *param)?));
+                }
+                if *is_macro {
+                    // macros always take a pointer to a `Semantic` as their last parameter
+                    sig.params.push(AbiParam::new(types::I64));
                 }
 
                 let return_size = type_size(&self.semantic, &module, *return_ty);
@@ -352,7 +352,9 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let insert_decl = {
                     let mut ins_sig = module.make_signature();
 
-                    ins_sig.params.push(AbiParam::new(types::I64));
+                    ins_sig
+                        .params
+                        .push(AbiParam::new(module.isa().pointer_type()));
                     ins_sig.params.push(AbiParam::new(types::I64));
                     ins_sig
                         .returns
@@ -365,12 +367,28 @@ impl<'a, 'b> Backend<'a, 'b> {
                     module.declare_func_in_func(ins_func_id, &mut builder.func)
                 };
 
+                // todo(chad): make all these decls part of a function instead of declaring them twice
+                let prepare_unquote_decl = {
+                    let mut sig = module.make_signature();
+
+                    sig.params.push(AbiParam::new(module.isa().pointer_type()));
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.params.push(AbiParam::new(module.isa().pointer_type()));
+
+                    let func_id = module
+                        .declare_function("__prepare_unquote", Linkage::Import, &sig)
+                        .unwrap();
+
+                    module.declare_func_in_func(func_id, &mut builder.func)
+                };
+
                 let mut fb = FunctionBackend {
                     semantic: &self.semantic,
                     values: &mut self.values,
                     builder: &mut builder,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
+                    prepare_unquote_decl,
                     insert_decl,
                     module: &mut module,
                 };
@@ -381,7 +399,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                // println!("{}", ctx.func.display(None));
+                println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -404,9 +422,155 @@ impl<'a, 'b> Backend<'a, 'b> {
         }
     }
 
-    // fn get_cranelift_type(&self, id: Id) -> Result<types::Type, CompileError> {
-    //     get_cranelift_type(&self.semantic, id)
-    // }
+    pub fn build_hoisted_function(
+        &mut self,
+        params: Vec<Id>,
+        hoisting_name: Id,
+    ) -> Result<*const u8, CompileError> {
+        let mut module: Module<SimpleJITBackend> = {
+            let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
+            jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
+            for (&name, &ptr) in crate::backend::FUNC_PTRS.lock().unwrap().iter() {
+                jit_builder.symbol(self.resolve_symbol(name), ptr.0);
+            }
+
+            Module::new(jit_builder)
+        };
+
+        self.funcs.clear();
+        for (name, sig) in self.func_sigs.iter() {
+            self.funcs.insert(
+                name.clone(),
+                module
+                    .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
+                    .unwrap(),
+            );
+        }
+
+        let mut ctx = module.make_context();
+        let mut sig = module.make_signature();
+
+        // param 0 = ptr to semantic
+        // todo(chad): eventually param 1 = ptr to return value
+        sig.params.push(AbiParam::new(module.isa().pointer_type()));
+
+        ctx.func.signature = sig;
+
+        // self
+        //     .func_sigs
+        //     .insert(func_sym, ctx.func.signature.clone());
+
+        let func = module
+            .declare_function("hoist", Linkage::Local, &ctx.func.signature)
+            .unwrap();
+        ctx.func.name = ExternalName::user(0, func.as_u32());
+
+        let dfp_decl = {
+            let mut dfp_sig = module.make_signature();
+
+            dfp_sig.params.push(AbiParam::new(types::I64));
+            dfp_sig
+                .returns
+                .push(AbiParam::new(module.isa().pointer_type()));
+
+            let dfp_func_id = module
+                .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
+                .unwrap();
+
+            module.declare_func_in_func(dfp_func_id, &mut ctx.func)
+        };
+
+        let insert_decl = {
+            let mut ins_sig = module.make_signature();
+
+            ins_sig.params.push(AbiParam::new(types::I64));
+            ins_sig.params.push(AbiParam::new(types::I64));
+            ins_sig
+                .returns
+                .push(AbiParam::new(module.isa().pointer_type()));
+
+            let ins_func_id = module
+                .declare_function("__macro_insert", Linkage::Import, &ins_sig)
+                .unwrap();
+
+            module.declare_func_in_func(ins_func_id, &mut ctx.func)
+        };
+
+        // todo(chad): make all these decls part of a function instead of declaring them twice
+        let prepare_unquote_decl = {
+            let mut sig = module.make_signature();
+
+            sig.params.push(AbiParam::new(module.isa().pointer_type()));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(module.isa().pointer_type()));
+
+            let func_id = module
+                .declare_function("__prepare_unquote", Linkage::Import, &sig)
+                .unwrap();
+
+            module.declare_func_in_func(func_id, &mut ctx.func)
+        };
+
+        // compile all top-level functions first
+        for id in self.semantic.topo.clone() {
+            self.compile_id(id)?;
+        }
+
+        let mut builder = Builder {
+            builder: FunctionBuilder::new(&mut ctx.func, &mut self.func_ctx),
+        };
+        let ebb = builder.create_ebb();
+        builder.switch_to_block(ebb);
+        builder.append_ebb_params_for_function_params(ebb);
+
+        let mut fb = FunctionBackend {
+            semantic: &self.semantic,
+            values: &mut self.values,
+            builder: &mut builder,
+            current_block: ebb,
+            dynamic_fn_ptr_decl: dfp_decl,
+            insert_decl,
+            prepare_unquote_decl,
+            module: &mut module,
+        };
+
+        for &param in params.iter() {
+            fb.compile_id(param)?;
+        }
+
+        // make the call
+        let magic_param = {
+            let current_fn_params = fb.builder.ebb_params(fb.current_block);
+            *current_fn_params.last().unwrap()
+        };
+        let normal_params = params
+            .iter()
+            .map(|param| fb.rvalue(*param))
+            .collect::<Vec<_>>();
+        let mut cranelift_params = normal_params;
+        cranelift_params.push(magic_param);
+
+        let found_macro = self.funcs[&hoisting_name];
+        let found_macro = module.declare_func_in_func(found_macro, &mut builder.func);
+
+        let _call_inst = builder.ins().call(found_macro, &cranelift_params);
+        // let return_value = builder.func.dfg.inst_results(call_inst)[0];
+        // self.set_value(id, return_value);
+
+        builder.ins().return_(&[]);
+
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        println!("{}", ctx.func.display(None));
+
+        module.define_function(func, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+
+        module.finalize_definitions();
+
+        Ok(module.get_finalized_function(func))
+    }
 }
 
 // fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
@@ -421,14 +585,15 @@ impl<'a, 'b> Backend<'a, 'b> {
 //         .map_err(|e| CompileError::from_string(String::from(e), range))
 // }
 
-struct FunctionBackend<'a, 'b, 'c> {
-    semantic: &'a Semantic<'b>,
-    values: &'a mut Vec<Value>,
-    builder: &'a mut Builder<'c>,
-    current_block: Ebb,
-    dynamic_fn_ptr_decl: FuncRef,
-    insert_decl: FuncRef,
-    module: &'a mut Module<SimpleJITBackend>,
+pub struct FunctionBackend<'a, 'b, 'c> {
+    pub semantic: &'a Semantic<'b>,
+    pub values: &'a mut Vec<Value>,
+    pub builder: &'a mut Builder<'c>,
+    pub current_block: Ebb,
+    pub dynamic_fn_ptr_decl: FuncRef,
+    pub prepare_unquote_decl: FuncRef,
+    pub insert_decl: FuncRef,
+    pub module: &'a mut Module<SimpleJITBackend>,
 }
 
 impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
@@ -545,7 +710,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         }
     }
 
-    fn compile_id(&mut self, id: Id) -> Result<(), CompileError> {
+    pub fn compile_id(&mut self, id: Id) -> Result<(), CompileError> {
         // idempotency
         match &self.values[id] {
             Value::Unassigned => {}
@@ -884,8 +1049,29 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 ty: _,   // Id
                 index,   // u16
             } => {
+                // we need our own storage
+                let size = type_size(&self.semantic, &self.module, id);
+                let slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
+
+                let slot_addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                let value = Value::Value(slot_addr);
+
                 let params = self.builder.ebb_params(self.current_block);
-                self.values[id] = Value::Value(params[index as usize]);
+                let param_value = params[index as usize];
+
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), param_value, slot_addr, 0);
+
+                self.values[id] = value;
+
                 Ok(())
             }
             Node::ValueParam {
@@ -969,20 +1155,57 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
-            Node::Insert(stmts) => {
+            Node::Insert { stmts, unquotes } => {
                 // When this macro runs, we want to tell the compiler to insert the statements.
                 // We accomplish that by generating a function call
                 let current_fn_params = self.builder.ebb_params(self.current_block);
+                let semantic_param = *current_fn_params.last().unwrap();
                 let cranelift_params = &[
-                    current_fn_params[0],
+                    semantic_param,
                     self.builder.ins().iconst(types::I64, stmts.0 as i64),
                 ];
+
+                for (index, unquote) in self
+                    .semantic
+                    .parser
+                    .id_vec(unquotes)
+                    .clone()
+                    .iter()
+                    .enumerate()
+                {
+                    self.compile_id(*unquote)?;
+                    println!(
+                        "resolving unquote for {}: {:?}",
+                        self.semantic.parser.debug(*unquote),
+                        self.values[*unquote]
+                    );
+
+                    let addr_of_value = self.values[*unquote].as_addr().as_value_relaxed(self);
+                    let prepare_unquote_params = &[
+                        semantic_param,
+                        self.builder.ins().iconst(types::I64, *unquote as i64),
+                        addr_of_value,
+                    ];
+                    self.builder
+                        .ins()
+                        .call(self.prepare_unquote_decl, prepare_unquote_params);
+                }
 
                 let call_inst = self.builder.ins().call(self.insert_decl, cranelift_params);
 
                 let value = self.builder.func.dfg.inst_results(call_inst)[0];
                 self.set_value(id, value);
 
+                Ok(())
+            }
+            Node::Unquote(unq) => {
+                self.compile_id(unq)?;
+                self.values[id] = self.values[unq];
+
+                Ok(())
+            }
+            Node::Code(stmts) => {
+                todo!("handle Node::Code in backend");
                 Ok(())
             }
             Node::TypeLiteral(_) => {
@@ -1062,7 +1285,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 }
 
-fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
+pub fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
     let range = semantic.parser.ranges[id];
     let ty = &semantic.types[id];
 
@@ -1090,7 +1313,7 @@ fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, Compi
     }
 }
 
-fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id) -> u32 {
+pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id) -> u32 {
     match &semantic.types[id] {
         Type::Basic(BasicType::None) => 0,
         Type::Basic(BasicType::Bool) => 4,
@@ -1131,18 +1354,33 @@ fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
 
+fn prepare_unquote(semantic: *mut Semantic, unquote_id: Id, address: *const u8) {
+    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
+
+    let value = unsafe { *(address as *const i64) };
+
+    println!(
+        "preparing unquote {}. Value (as i64) is {}",
+        semantic.parser.debug(unquote_id),
+        value
+    );
+
+    // todo(chad): @ConstValue
+    semantic.unquote_values.push(value);
+}
+
 fn macro_insert(semantic: *mut Semantic, stmts: Id) {
     let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
     let stmts = IdVec(stmts);
     let expansion_site = semantic.macro_expansion_site.unwrap();
     let scope = semantic.parser.node_scopes[expansion_site];
 
-    println!("****");
-    println!(
-        "inserting stmts for current macro expansion context: {:?} {}",
-        stmts,
-        semantic.parser.debug(expansion_site)
-    );
+    // println!("****");
+    // println!(
+    //     "inserting stmts for current macro expansion context: {:?} {}",
+    //     stmts,
+    //     semantic.parser.debug(expansion_site)
+    // );
 
     let insertion_point = match semantic.parser.nodes[expansion_site] {
         Node::Call { macro_stmts, .. } => macro_stmts,
@@ -1151,7 +1389,7 @@ fn macro_insert(semantic: *mut Semantic, stmts: Id) {
 
     let mut inserted_stmts = Vec::new();
     for stmt in semantic.parser.id_vec(stmts).clone() {
-        println!("inserting statement :: {}", semantic.parser.debug(stmt));
+        // println!("inserting statement :: {}", semantic.parser.debug(stmt));
         inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
     }
 
