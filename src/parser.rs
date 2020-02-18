@@ -64,6 +64,7 @@ pub enum BasicType {
 pub enum Type {
     Unassigned,
     Basic(BasicType),
+    Code,
     Pointer(Id),
     String,
     Func {
@@ -138,6 +139,8 @@ enum Token {
     Fn,
     Macro,
     Insert,
+    HashCodeStmt,
+    HashCodeExpr,
     Code,
     True,
     False,
@@ -371,7 +374,13 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("#insert", Token::Insert) {
             return;
         }
-        if self.prefix_keyword("#code", Token::Code) {
+        if self.prefix_keyword("#code_stmt", Token::HashCodeStmt) {
+            return;
+        }
+        if self.prefix_keyword("#code_expr", Token::HashCodeExpr) {
+            return;
+        }
+        if self.prefix_keyword("Code", Token::Code) {
             return;
         }
         if self.prefix_keyword("i8", Token::I8) {
@@ -661,6 +670,7 @@ pub enum Node {
         unquotes: IdVec,
     },
     Code(IdVec),
+    UnquotedCodeInsert(IdVec), // todo(chad): combine this with the `Code` node? with a flag?
     DeclParam {
         name: Sym,
         ty: Id,
@@ -909,7 +919,12 @@ impl<'a> Parser<'a> {
                     }),
                 ))
             }
-            Token::Code => 
+            Token::Code => {
+                let range = self.lexer.top.range;
+                self.lexer.pop(); // `Code`
+
+                Ok(self.push_node(range, Node::TypeLiteral(Type::Code)))
+            }
             Token::Struct => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `struct`
@@ -1073,7 +1088,7 @@ impl<'a> Parser<'a> {
     //     Ok(self.push_node(range, Node::While { cond, stmts }))
     // }
 
-    fn parse_expression(&mut self) -> Result<Id, CompileError> {
+    pub fn parse_expression(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok.clone() {
             Token::IntegerLiteral(_) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
             Token::StringLiteral(s) => {
@@ -1102,10 +1117,10 @@ impl<'a> Parser<'a> {
 
                 Ok(self.push_node(Range::new(start, end), Node::Load(expr)))
             }
-            Token::Code => {
+            Token::HashCodeStmt => {
                 let start = self.lexer.top.range.start;
 
-                self.lexer.pop(); // `#code`
+                self.lexer.pop(); // `#code_stmt`
 
                 self.current_unquote = self.push_id_vec(Vec::new());
                 self.unquote_scope = self.top_scope;
@@ -1118,6 +1133,27 @@ impl<'a> Parser<'a> {
                 while self.lexer.top.tok != Token::RCurly {
                     stmts.push(self.parse_fn_stmt()?);
                 }
+                let stmts = self.push_id_vec(stmts);
+                let range = self.expect_range(start, Token::RCurly)?;
+
+                self.pop_scope(pushed_scope);
+
+                Ok(self.push_node(range, Node::Code(stmts)))
+            }
+            Token::HashCodeExpr => {
+                let start = self.lexer.top.range.start;
+
+                self.lexer.pop(); // `#code_expr`
+
+                self.current_unquote = self.push_id_vec(Vec::new());
+                self.unquote_scope = self.top_scope;
+
+                // open a new scope
+                let pushed_scope = self.push_scope();
+
+                self.expect(&Token::LCurly)?;
+                let mut stmts = Vec::new();
+                stmts.push(self.parse_expression()?);
                 let stmts = self.push_id_vec(stmts);
                 let range = self.expect_range(start, Token::RCurly)?;
 

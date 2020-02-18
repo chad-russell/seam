@@ -1,4 +1,4 @@
-fn main() i32 {
+fn main() i64 {
     // return poly_call(id, 15);
     // return poly_call(poly_id, 99);
     // return poly_omg(poly_call, poly_id, 10);
@@ -13,15 +13,25 @@ fn main() i32 {
     // return bar();
     // return test_load_param();
 
-    test_macro(#code { let a = 10; });
+    // test_macro_let(#code_stmt { let a = 10; });
+
+    let outer = 14;
+    test_macro_let_partial(#code_expr { outer });
+
     return a;
 }
 
-macro test_macro(c: #code) {
-    #insert {
-        \c
-    }
+macro test_macro_let(c: Code) {
+    #insert{ \c }
+    return {};
+}
 
+macro test_macro_let_partial(c: Code) {
+    let some_code = c;
+
+    #insert {
+        let a = \some_code;
+    }
     return {};
 }
 

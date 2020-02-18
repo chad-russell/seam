@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
 
 type Sym = usize;
 
@@ -13,7 +13,7 @@ pub struct Semantic<'a> {
     pub type_matches: Vec<Vec<Id>>,
     pub macro_phase: bool,
     pub macro_expansion_site: Option<Id>, // todo(chad): make this just Id once we're confident it's always set
-    pub unquote_values: Vec<i64>,         // todo(chad): @ConstValue
+    pub unquote_values: Vec<Node>,        // todo(chad): @ConstValue
 }
 
 impl<'a> Semantic<'a> {
@@ -126,13 +126,11 @@ impl<'a> Semantic<'a> {
             backend.semantic.parser.parsed_unquotes.clear();
             f(backend.semantic as _);
 
-            // todo(chad): come up with a better theory of constant values
             let unquotes = backend.semantic.parser.parsed_unquotes.clone();
             let values = backend.semantic.unquote_values.clone();
             for (unquote, value) in unquotes.iter().zip(values.iter()) {
-                let range = backend.semantic.parser.ranges[*unquote];
-                println!("VALUE: {}", *value);
-                backend.semantic.parser.nodes[*unquote] = Node::IntLiteral(*value);
+                println!("VALUE: {:?}", value);
+                backend.semantic.parser.nodes[*unquote] = *value;
             }
         }
 
@@ -501,6 +499,9 @@ impl<'a> Semantic<'a> {
 
                         self.types[id] = ty.clone();
                     }
+                    Type::Code => {
+                        self.types[id] = ty.clone();
+                    }
                     Type::Unassigned => unreachable!(),
                 }
 
@@ -671,7 +672,26 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::Code(stmts) => {
-                todo!("handle Node::Code in semantic");
+                self.types[id] = Type::Code;
+
+                if !self.macro_phase {
+                    for stmt in self.parser.id_vec(stmts).clone() {
+                        self.assign_type(stmt)?;
+                    }
+                }
+
+                Ok(())
+            }
+            Node::UnquotedCodeInsert(stmts) => {
+                for stmt in self.parser.id_vec(stmts).clone() {
+                    self.assign_type(stmt)?;
+                }
+
+                // todo(chad): dangerous?
+                if let Some(&stmt) = self.parser.id_vec(stmts).first() {
+                    self.match_types(id, stmt);
+                }
+
                 Ok(())
             }
             // _ => Err(CompileError::from_string(
@@ -746,6 +766,16 @@ impl<'a> Semantic<'a> {
     pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
         // println!("copying stmt!");
 
+        let is_expr = match &self.parser.nodes[id] {
+            Node::IntLiteral(_) => true,
+            Node::BoolLiteral(_) => true,
+            Node::FloatLiteral(_) => true,
+            Node::Symbol(_) => true,
+            Node::Ref(_) => true,
+            Node::Load(_) => true,
+            _ => false,
+        };
+
         let range = self.parser.ranges[id];
         let source =
             &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
@@ -756,7 +786,11 @@ impl<'a> Semantic<'a> {
         self.parser.top_scope = scope;
         self.parser.copying = true;
 
-        let copied = self.parser.parse_fn_stmt().unwrap();
+        let copied = if is_expr {
+            self.parser.parse_expression().unwrap()
+        } else {
+            self.parser.parse_fn_stmt().unwrap()
+        };
 
         while self.types.len() < self.parser.nodes.len() {
             self.types.push(Type::Unassigned);
