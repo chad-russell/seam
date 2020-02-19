@@ -13,27 +13,42 @@ fn main() i64 {
     // return bar();
     // return test_load_param();
 
-    // test_macro_let(#code_stmt { let a = 10; });
+    let v1 = 3;
+    let v2 = 6;
 
-    let outer = 14;
-    test_macro_let_partial(#code_expr { outer });
+    test_macro_let(#code_expr { v1 }, #code_expr { v2 }, true);
 
     return a;
 }
 
-macro test_macro_let(c: Code) {
-    #insert{ \c }
-    return {};
-}
-
-macro test_macro_let_partial(c: Code) {
-    let some_code = c;
-
-    #insert {
-        let a = \some_code;
+macro test_macro_let(tr: Code, fa: Code, sw: bool) {
+    if sw {
+        #insert{ let a = \tr; }
     }
+    else {
+        #insert{ let b = \fa; }
+    }
+
     return {};
 }
+
+// macro test_macro_let_partial(c: Code) {
+//     let some_code = c;
+
+//     #insert {
+//         let a = \some_code;
+//     }
+//     return {};
+// }
+
+// fn macro_test() i64 {
+//     // test_macro_let(#code_stmt { let a = 10; });
+
+//     let outer = 14;
+//     test_macro_let_partial(#code_expr { outer });
+
+//     return a;
+// }
 
 // struct Point {
 //     x: i64,

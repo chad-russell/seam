@@ -297,7 +297,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 self.values[id] = Value::FuncRef(func_sym);
 
-                println!("compiling func {}", func_name);
+                // println!("compiling func {}", func_name);
 
                 let mut sig = module.make_signature();
 
@@ -564,7 +564,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         builder.seal_all_blocks();
         builder.finalize();
 
-        println!("{}", ctx.func.display(None));
+        // println!("{}", ctx.func.display(None));
 
         module.define_function(func, &mut ctx).unwrap();
         module.clear_context(&mut ctx);
@@ -693,9 +693,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     }
 
     fn rvalue(&mut self, id: Id) -> CraneliftValue {
-        let rvalue_is_ptr = self.rvalue_is_ptr(id);
-
-        if rvalue_is_ptr {
+        if self.rvalue_is_ptr(id) {
             let ty = &self.semantic.types[id];
             let ty = match ty {
                 Type::Struct { .. } => self.module.isa().pointer_type(),
@@ -949,56 +947,64 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     self.compile_call(id, name, &params)
                 }
             }
-            // Node::If(cond_id, true_id, false_id) => {
-            //     let size = type_size(id);
-            //     let slot = self.builder.create_stack_slot(StackSlotData {
-            //         kind: StackSlotKind::ExplicitSlot,
-            //         size,
-            //         offset: None,
-            //     });
-            //     let slot_addr =
-            //         self.builder
-            //             .ins()
-            //             .stack_addr(self.module.isa().pointer_type(), slot, 0);
-            //     self.values[id] = Value::Value(slot_addr);
+            Node::If {
+                cond,
+                true_stmts,
+                false_stmts,
+            } => {
+                self.compile_id(cond)?;
+                let cond = self.rvalue(cond);
 
-            //     let true_block = self.builder.create_ebb();
-            //     let false_block = self.builder.create_ebb();
-            //     let cont_block = self.builder.create_ebb();
+                let true_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(true_block);
 
-            //     self.compile_id(*cond_id)?;
-            //     let cond = self.rvalue(*cond_id);
+                let false_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(false_block);
 
-            //     self.builder.ins().brnz(cond, true_block, &[]);
-            //     self.builder.ins().jump(false_block, &[]);
+                let cont_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(cont_block);
 
-            //     // true
-            //     {
-            //         self.builder.switch_to_block(true_block);
-            //         self.current_block = true_block;
-            //         self.compile_id(*true_id)?;
+                let current_params = self.builder.ebb_params(self.current_block).to_vec().clone();
 
-            //         self.store(*true_id, &Value::Value(slot_addr));
+                self.builder.ins().brnz(cond, true_block, &current_params);
+                self.builder.ins().jump(false_block, &current_params);
 
-            //         self.builder.ins().jump(cont_block, &[]);
-            //     }
+                // true
+                {
+                    self.builder.switch_to_block(true_block);
+                    self.current_block = true_block;
 
-            //     // false
-            //     if false_id.is_some() {
-            //         self.builder.switch_to_block(false_block);
-            //         self.current_block = false_block;
-            //         self.compile_id(false_id.unwrap())?;
+                    for stmt in self.semantic.parser.id_vec(true_stmts).clone() {
+                        self.compile_id(stmt)?;
+                    }
 
-            //         self.store(false_id.unwrap(), &Value::Value(slot_addr));
+                    let current_params =
+                        self.builder.ebb_params(self.current_block).to_vec().clone();
+                    self.builder.ins().jump(cont_block, &current_params);
+                }
 
-            //         self.builder.ins().jump(cont_block, &[]);
-            //     }
+                // false
+                {
+                    self.builder.switch_to_block(false_block);
+                    self.current_block = false_block;
 
-            //     self.builder.switch_to_block(cont_block);
-            //     self.current_block = cont_block;
+                    for stmt in self.semantic.parser.id_vec(false_stmts).clone() {
+                        self.compile_id(stmt)?;
+                    }
 
-            //     Ok(())
-            // }
+                    let current_params =
+                        self.builder.ebb_params(self.current_block).to_vec().clone();
+                    self.builder.ins().jump(cont_block, &current_params);
+                }
+
+                self.builder.switch_to_block(cont_block);
+                self.current_block = cont_block;
+
+                Ok(())
+            }
             Node::Ref(ref_id) => {
                 self.compile_id(ref_id)?;
                 match self.values[ref_id] {
@@ -1169,11 +1175,11 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 for unquote in self.semantic.parser.id_vec(unquotes).clone() {
                     self.compile_id(unquote)?;
-                    println!(
-                        "resolving unquote for {}: {:?}",
-                        self.semantic.parser.debug(unquote),
-                        self.values[unquote]
-                    );
+                    // println!(
+                    //     "resolving unquote for {}: {:?}",
+                    //     self.semantic.parser.debug(unquote),
+                    //     self.values[unquote]
+                    // );
 
                     let is_unquote_code = match &self.semantic.types[unquote] {
                         Type::Code => true,
@@ -1411,9 +1417,9 @@ fn prepare_unquote(
             _ => unreachable!(),
         };
 
-        for stmt in semantic.parser.id_vec(stmts).clone() {
-            println!("{}", semantic.parser.debug(stmt));
-        }
+        // for stmt in semantic.parser.id_vec(stmts).clone() {
+        //     println!("{}", semantic.parser.debug(stmt));
+        // }
 
         // let scope = semantic.parser.node_scopes[unquote_id];
         let expansion_site = semantic.macro_expansion_site.unwrap();

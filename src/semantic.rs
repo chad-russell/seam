@@ -129,7 +129,6 @@ impl<'a> Semantic<'a> {
             let unquotes = backend.semantic.parser.parsed_unquotes.clone();
             let values = backend.semantic.unquote_values.clone();
             for (unquote, value) in unquotes.iter().zip(values.iter()) {
-                println!("VALUE: {:?}", value);
                 backend.semantic.parser.nodes[*unquote] = *value;
             }
         }
@@ -224,6 +223,22 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
+                Ok(())
+            }
+            Node::If {
+                cond,
+                true_stmts,
+                false_stmts
+            } => {
+                self.assign_type(cond)?;
+
+                for stmt in self.parser.id_vec(true_stmts).clone() {
+                    self.assign_type(stmt)?;
+                }
+                for stmt in self.parser.id_vec(false_stmts).clone() {
+                    self.assign_type(stmt)?;
+                }
+                
                 Ok(())
             }
             Node::Field {

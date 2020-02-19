@@ -1,29 +1,10 @@
 # TODO
 
-- [x] local variables
-- [x] if/else
-- [x] functions as values
-- [x] pointers
-  - [x] address-of
-  - [x] permit taking address of immediate value -- do the trick where we put it on the stack and then save it so it has memory
-  - [x] deref
-  - [x] function pointers
-- [x] function parameters
-- [x] structs
-  - [x] declaration
-  - [x] struct literals (with own slot)
-  - [x] dot syntax
-  - [x] address of field
-- [x] syntax overhaul -- more c/rust/go/jai like
 - [x] basic enum support
   - [x] set enum tag during enum literal construction
   - [x] set enum tag when assigning to field through a dot
   - [ ] support `.tag` pseudo-property
   - [ ] check enum tag when accessing through a field
-- [x] let binding type inference
-- [ ] #insert scope issue:
-  - #insert stmts need their own scope.
-  - when parsing unquotes inside of a #insert block, the scope needs to be the outer scope that the #insert block is in, and NOT the inner scope of the #insert block.
 - [ ] generics
   - [x] for functions
   - [x] for structs
@@ -32,23 +13,22 @@
   - [ ] baking
   - [ ] non-type (constant value) params
   - [x] check conflicts during unification
-- [x] (mutually) recursive structs / functions
-- [ ] compile-time functions -> macros
-  - [x] arbitrary compile-time parameters (need to have support for constant values, and build a function hoisting platform)
-  - [x] unquote
-  - [ ] #code parameters
 - [ ] structs as function parameters / return values
   - [ ] structs as compile-time parameters / return values
   - [ ] follow C ABI, at least for extern functions
 - [ ] first-class types
+  - [ ] in generics we should be able to do compile-time logic on the `T` type that doesn't make it into the final executable
+  - [ ] same with anything that comes as the result of `typeof`
 - [ ] arrays
-- [x] return type inference (`fn foo() { return 3; }` should infer return type i64)
 - [ ] defer
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] math (binary operations)
 - [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
-- [ ] if
+- [x] if
+  - [ ] as value expression
+  - [ ] `else if`
+- [ ] short-circuit logical `and` and `or`
 - [ ] while
 - [ ] for (with macros?)
 - [ ] f32/f64

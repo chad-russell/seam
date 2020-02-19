@@ -142,6 +142,8 @@ enum Token {
     HashCodeStmt,
     HashCodeExpr,
     Code,
+    If,
+    Else,
     True,
     False,
     I8,
@@ -369,6 +371,12 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix_keyword("macro", Token::Macro) {
+            return;
+        }
+        if self.prefix_keyword("if", Token::If) {
+            return;
+        }
+        if self.prefix_keyword("else", Token::Else) {
             return;
         }
         if self.prefix_keyword("#insert", Token::Insert) {
@@ -632,6 +640,11 @@ pub enum Node {
     BoolLiteral(bool),
     StringLiteral(Sym),
     TypeLiteral(Type),
+    If {
+        cond: Id,
+        true_stmts: IdVec,
+        false_stmts: IdVec,
+    },
     Field {
         base: Id,
         field_name: Sym,
@@ -814,7 +827,6 @@ impl<'a> Parser<'a> {
             // sym_and,
             // sym_or,
             // sym_not,
-            // sym_if,
             // sym_while,
             // sym_extern,
         }
@@ -1046,33 +1058,51 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
-    //     let cond_expr = self.parse_expression()?;
-    //     let true_expr = self.parse_expression()?;
+    fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
+        self.expect(&Token::If)?;
 
-    //     let false_expr = if self.lexer.top.tok != Token::RParen {
-    //         Some(self.parse_expression()?)
-    //     } else {
-    //         None
-    //     };
+        let cond_expr = match (&self.lexer.top.tok, &self.lexer.second.tok) {
+            (Token::Symbol(_), Token::LCurly) => self.parse_symbol()?,
+            _ => self.parse_expression()?,
+        };
+        self.expect(&Token::LCurly)?;
 
-    //     let true_stmts = self.push_id_vec(vec![true_expr]);
-    //     let false_stmts = false_expr.map(|fe| self.push_id_vec(vec![fe]));
+        let mut true_stmts = Vec::new();
+        while self.lexer.top.tok != Token::RCurly {
+            true_stmts.push(self.parse_fn_stmt()?);
+        }
+        let mut end = self.lexer.top.range.end;
+        self.expect(&Token::RCurly)?;
+        let true_stmts = self.push_id_vec(true_stmts);
 
-    //     let range = self.expect_close_paren(start)?;
-    //     let if_id = self.push_node(
-    //         range,
-    //         Node::If {
-    //             cond: cond_expr,
-    //             true_stmts,
-    //             false_stmts,
-    //         },
-    //     );
+        let mut false_stmts = Vec::new();
+        if self.lexer.top.tok == Token::Else {
+            self.lexer.pop(); // `else`
+            self.expect(&Token::LCurly)?;
 
-    //     self.local_insert(if_id);
+            while self.lexer.top.tok != Token::RCurly {
+                false_stmts.push(self.parse_fn_stmt()?);
+            }
 
-    //     Ok(if_id)
-    // }
+            end = self.lexer.top.range.end;
+            self.expect(&Token::RCurly)?;
+        }
+        let false_stmts = self.push_id_vec(false_stmts);
+
+        let range = Range::new(start, end);
+
+        Ok(self.push_node(
+            range,
+            Node::If {
+                cond: cond_expr,
+                true_stmts,
+                false_stmts,
+            },
+        ))
+
+        // self.local_insert(if_id);
+        // Ok(if_id)
+    }
 
     // fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
     //     let cond = self.parse_expression()?;
@@ -1332,6 +1362,7 @@ impl<'a> Parser<'a> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
+            Token::If => self.parse_if(start),
             Token::Backslash => self.parse_unquote(),
             Token::Symbol(sym) if sym == self.sym_return => {
                 self.lexer.pop(); // `return`
