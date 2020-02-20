@@ -265,6 +265,26 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
+                match &self.types[unpointered_ty] {
+                    Type::String => {
+                        let field_name = self.parser.resolve_sym_unchecked(field_name);
+                        match field_name {
+                            "len" => {
+                                self.types[id] = Type::Basic(BasicType::I64);
+                            },
+                            "buf" => {
+                                // todo(chad): maybe make StringPointer its own type or something?
+                                // or have Ids that will always reference basic types
+                                self.types[id] = Type::Type;
+                            },
+                            _ => return Err(CompileError::from_string("Valid fields on strings are 'len' or 'buf'", self.parser.ranges[id])),
+                        }
+
+                        return Ok(())
+                    }
+                    _ => ()
+                }
+
                 let params = self.types[unpointered_ty].as_struct_params().ok_or(
                     CompileError::from_string(
                         format!(

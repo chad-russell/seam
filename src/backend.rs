@@ -1199,7 +1199,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             }
             Node::Field {
                 base,
-                field_name: _,
+                field_name,
                 field_index,
                 is_assignment,
             } => {
@@ -1210,6 +1210,39 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                     Type::Pointer(id) => (id, true),
                     _ => (base, false),
                 };
+
+                // field access on a string
+                match &self.semantic.types[unpointered_ty] {
+                    Type::String => {
+                        let field_name =
+                            String::from(self.semantic.parser.resolve_sym_unchecked(field_name));
+
+                        let mut base = self.as_value(base);
+
+                        if loaded {
+                            // if we are doing field access through a pointer, do an extra load
+                            base = self.builder.ins().load(
+                                self.module.isa().pointer_type(),
+                                MemFlags::new(),
+                                base,
+                                0,
+                            );
+                        }
+
+                        match field_name.as_str() {
+                            "len" => (),
+                            "buf" => {
+                                let offset = self.builder.ins().iconst(types::I64, 8);
+                                base = self.builder.ins().iadd(base, offset);
+                            }
+                            _ => unreachable!(),
+                        }
+
+                        self.values[id] = base.into();
+                        return Ok(());
+                    }
+                    _ => (),
+                }
 
                 // all field accesses on enums have the same offset -- just the tag size in bytes
                 let is_enum = match &self.semantic.types[unpointered_ty] {
