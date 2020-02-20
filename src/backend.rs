@@ -6,7 +6,7 @@ use cranelift::prelude::{
     types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
 };
-use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
+use cranelift_module::{default_libcall_names, DataContext, DataId, FuncId, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 
 use std::collections::BTreeMap;
@@ -275,12 +275,15 @@ impl<'a, 'b> Backend<'a, 'b> {
                     jit_builder.symbol("__macro_insert", macro_insert as *const u8);
                     jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
                     jit_builder.symbol("print_int", print_int as *const u8);
+                    jit_builder.symbol("print_string", print_string as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
                     }
 
                     Module::new(jit_builder)
                 };
+
+                let string_literal_data_ids = self.get_string_literal_data_ids(&mut module);
 
                 self.funcs.clear();
                 for (name, sig) in self.func_sigs.iter() {
@@ -433,6 +436,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     values: &mut self.values,
                     builder: &mut builder,
                     current_block: ebb,
+                    string_literal_data_ids,
                     dynamic_fn_ptr_decl: dfp_decl,
                     prepare_unquote_decl,
                     insert_decl,
@@ -484,6 +488,8 @@ impl<'a, 'b> Backend<'a, 'b> {
 
             Module::new(jit_builder)
         };
+
+        let string_literal_data_ids = self.get_string_literal_data_ids(&mut module);
 
         self.funcs.clear();
         for (name, sig) in self.func_sigs.iter() {
@@ -576,6 +582,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             values: &mut self.values,
             builder: &mut builder,
             current_block: ebb,
+            string_literal_data_ids,
             dynamic_fn_ptr_decl: dfp_decl,
             insert_decl,
             prepare_unquote_decl,
@@ -619,6 +626,41 @@ impl<'a, 'b> Backend<'a, 'b> {
 
         Ok(module.get_finalized_function(func))
     }
+
+    fn get_string_literal_data_ids(
+        &mut self,
+        module: &mut Module<SimpleJITBackend>,
+    ) -> BTreeMap<Id, DataId> {
+        let mut string_literal_data_ids = BTreeMap::new();
+
+        for lit in self.semantic.parser.string_literals.clone() {
+            // declare data section for string literals
+            let string_literal_data_id = module
+                .declare_data(&format!("str_lit_{}", lit), Linkage::Local, false, None)
+                .unwrap();
+
+            let mut data_ctx = DataContext::new();
+            let mut lits = String::new();
+            let lit_sym = match self.semantic.parser.nodes[lit] {
+                Node::StringLiteral { sym, .. } => sym,
+                _ => unreachable!(),
+            };
+            let lit_str = self.resolve_symbol(lit_sym);
+
+            lits += lit_str.as_str();
+
+            let raw_bytes: Box<[u8]> = lits.into_boxed_str().into_boxed_bytes();
+            data_ctx.define(raw_bytes);
+
+            module
+                .define_data(string_literal_data_id, &data_ctx)
+                .unwrap();
+
+            string_literal_data_ids.insert(lit, string_literal_data_id);
+        }
+
+        string_literal_data_ids
+    }
 }
 
 // fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
@@ -638,6 +680,7 @@ pub struct FunctionBackend<'a, 'b, 'c> {
     pub values: &'a mut Vec<Value>,
     pub builder: &'a mut Builder<'c>,
     pub current_block: Ebb,
+    pub string_literal_data_ids: BTreeMap<Id, DataId>,
     pub dynamic_fn_ptr_decl: FuncRef,
     pub prepare_unquote_decl: FuncRef,
     pub insert_decl: FuncRef,
@@ -1370,6 +1413,44 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
+            Node::StringLiteral { bytes, .. } => {
+                let lit_id = self.string_literal_data_ids[&id];
+
+                let string_lit_ptr = self
+                    .module
+                    .declare_data_in_func(lit_id, &mut self.builder.func);
+                let global = self
+                    .builder
+                    .ins()
+                    .global_value(self.module.isa().pointer_type(), string_lit_ptr);
+
+                let len_value = self.builder.ins().iconst(types::I64, bytes as i64);
+
+                let size = type_size(&self.semantic, &self.module, id);
+                let struct_slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
+                let dest_addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), struct_slot, 0);
+
+                // store the length
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), len_value, dest_addr, 0);
+
+                // store the ptr
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), global, dest_addr, 8);
+
+                self.values[id] = Value::Value(dest_addr);
+
+                Ok(())
+            }
             Node::ArrayAccess { arr, index } => {
                 self.compile_id(arr)?;
                 self.compile_id(index)?;
@@ -1544,8 +1625,8 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
             let tag_size = ENUM_TAG_SIZE_BYTES;
             tag_size + biggest_param
         }
-        // ptr + 64-bit length
-        Type::Array(_) => module.isa().pointer_bytes() as u32 + 8,
+        // 64-bit length + ptr
+        Type::Array(_) | Type::String => module.isa().pointer_bytes() as u32 + 8,
         _ => todo!(
             "type_size for {:?} ({})",
             &semantic.types[id],
@@ -1634,4 +1715,9 @@ fn macro_insert(semantic: *mut Semantic, stmts: Id) {
 
 fn print_int(n: i64) {
     println!("{}", n);
+}
+
+fn print_string(len: i64, bytes: *mut u8) {
+    let s = unsafe { String::from_raw_parts(bytes, len as usize, len as usize) };
+    println!("{}", s);
 }

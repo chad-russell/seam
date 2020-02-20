@@ -1,6 +1,25 @@
 extern print_int(i: i64) struct{};
+extern print_string(len: i64, ptr: *i8) struct{};
+
+struct hack_str {
+    len: i64,
+    ptr: *i8,
+}
+
+fn hack_str_get_len(s: *hack_str) i64 {
+    return s.len;
+}
+
+fn hack_str_get_ptr(s: *hack_str) *i8 {
+    return s.ptr;
+}
 
 fn main() i64 {
+    let s = "hello";
+    let len = hack_str_get_len(&s);
+    let ptr = hack_str_get_ptr(&s);
+    print_string(len, ptr);
+
     return 0;
 }
 

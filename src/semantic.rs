@@ -177,7 +177,7 @@ impl<'a> Semantic<'a> {
                 self.types[id] = Type::Basic(BasicType::Bool);
                 Ok(())
             }
-            Node::StringLiteral(_) => {
+            Node::StringLiteral { .. } => {
                 self.types[id] = Type::String;
                 Ok(())
             }
@@ -1029,7 +1029,7 @@ impl<'a> Semantic<'a> {
                 .collect::<Vec<_>>();
 
             // set all types to whatever we unified to
-            if let Some(&ty) = tys.first() {
+            if let Some(&ty) = tys.last() {
                 match self.types[ty as usize].clone() {
                     Type::Basic(BasicType::IntLiteral) => {
                         self.types[ty as usize] = Type::Basic(BasicType::I64);

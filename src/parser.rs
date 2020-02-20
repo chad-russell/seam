@@ -582,6 +582,8 @@ pub struct Parser<'a> {
     pub unquote_scope: Id,
 
     pub returns: Vec<Id>,
+    pub string_literals: Vec<Id>,
+    pub string_literal_offset: usize,
 
     pub is_in_insert: bool,
     pub current_unquote: IdVec,
@@ -652,7 +654,10 @@ pub enum Node {
     IntLiteral(i64),
     FloatLiteral(f64),
     BoolLiteral(bool),
-    StringLiteral(Sym),
+    StringLiteral {
+        sym: Sym,
+        bytes: usize,
+    },
     TypeLiteral(Type),
     If {
         cond: Id,
@@ -817,6 +822,8 @@ impl<'a> Parser<'a> {
             top_level_map: Default::default(),
             id_vecs: Default::default(),
             returns: Default::default(),
+            string_literals: Default::default(),
+            string_literal_offset: 0,
             current_unquote: IdVec(0),
             parsed_unquotes: Default::default(),
             is_in_insert: false,
@@ -1132,8 +1139,16 @@ impl<'a> Parser<'a> {
             Token::StringLiteral(s) => {
                 let range = self.lexer.top.range;
                 self.lexer.pop();
+                let bytes = s.bytes().len();
                 let sym = self.lexer.string_interner.get_or_intern(s);
-                Ok(self.push_node(range, Node::StringLiteral(sym)))
+                let string_id = self.push_node(range, Node::StringLiteral { sym, bytes });
+                self.string_literal_offset += bytes;
+                self.string_literals.push(string_id);
+
+                // it's a struct, so addressable (for now)
+                self.node_is_addressable[string_id] = true;
+
+                Ok(string_id)
             }
             Token::Ampersand => {
                 let start = self.lexer.top.range.start;
