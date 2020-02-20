@@ -1,53 +1,23 @@
+extern print_int(i: i64) struct{};
+
 fn main() i64 {
-    // return poly_call(id, 15);
-    // return poly_call(poly_id, 99);
-    // return poly_omg(poly_call, poly_id, 10);
-    // return test_poly1();
-
-    // return omg(call, id, 10);
-    // return call(id, 10);
-
-    // return test_fn_ptr();
-    // return cpi_test();
-    // return baz();
-    // return bar();
-    // return test_load_param();
-
-    let v1 = 3;
-    let v2 = 6;
-
-    test_macro_let(#code_expr { v1 }, #code_expr { v2 }, true);
-
-    return a;
+    return 0;
 }
 
-macro test_macro_let(tr: Code, fa: Code, sw: bool) {
-    if sw {
-        #insert{ let a = \tr; }
-    }
-    else {
-        #insert{ let b = \fa; }
-    }
+// fn old_tests() i64 {
+//     return poly_call(id, 15);
+//     return poly_call(poly_id, 99);
+//     return poly_omg(poly_call, poly_id, 10);
+//     return test_poly1();
 
-    return {};
-}
+//     return omg(call, id, 10);
+//     return call(id, 10);
 
-// macro test_macro_let_partial(c: Code) {
-//     let some_code = c;
-
-//     #insert {
-//         let a = \some_code;
-//     }
-//     return {};
-// }
-
-// fn macro_test() i64 {
-//     // test_macro_let(#code_stmt { let a = 10; });
-
-//     let outer = 14;
-//     test_macro_let_partial(#code_expr { outer });
-
-//     return a;
+//     return test_fn_ptr();
+//     return cpi_test();
+//     return baz();
+//     return bar();
+//     return test_load_param();
 // }
 
 // struct Point {

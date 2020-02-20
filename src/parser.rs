@@ -80,6 +80,7 @@ pub enum Type {
         params: IdVec,
         copied_from: Option<Id>,
     },
+    Array(Id),
     Type,
 }
 
@@ -126,6 +127,8 @@ enum Token {
     RParen,
     LCurly,
     RCurly,
+    LSquare,
+    RSquare,
     Semicolon,
     Colon,
     Bang,
@@ -138,6 +141,7 @@ enum Token {
     Enum,
     Fn,
     Macro,
+    Extern,
     Insert,
     HashCodeStmt,
     HashCodeExpr,
@@ -373,6 +377,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("macro", Token::Macro) {
             return;
         }
+        if self.prefix_keyword("extern", Token::Extern) {
+            return;
+        }
         if self.prefix_keyword("if", Token::If) {
             return;
         }
@@ -429,6 +436,12 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix("}", Token::RCurly) {
+            return;
+        }
+        if self.prefix("[", Token::LSquare) {
+            return;
+        }
+        if self.prefix("]", Token::RSquare) {
             return;
         }
         if self.prefix(",", Token::Comma) {
@@ -582,6 +595,7 @@ pub struct Parser<'a> {
     // todo(chad): represent list of locals per function
     pub top_level: Vec<Id>,
     pub macros: Vec<Id>,
+    pub externs: Vec<Id>,
     pub calls: Vec<Id>,
     pub top_level_map: BTreeMap<Sym, Id>,
 
@@ -678,6 +692,11 @@ pub enum Node {
         returns: IdVec,
         is_macro: bool,
     },
+    Extern {
+        name: Sym,
+        params: IdVec,
+        return_ty: Id,
+    },
     Insert {
         stmts: IdVec,
         unquotes: IdVec,
@@ -688,6 +707,8 @@ pub enum Node {
         name: Sym,
         ty: Id,
         index: u16,
+        is_ct: bool,
+        ct_link: Option<Id>,
     },
     Struct {
         name: Sym,
@@ -703,17 +724,23 @@ pub enum Node {
         name: Option<Sym>,
         value: Id,
         index: u16,
+        is_ct: bool,
     },
     StructLiteral {
         name: Option<Sym>,
         params: IdVec,
     },
+    ArrayLiteral(IdVec),
     Call {
         name: Id,
         ct_params: Option<IdVec>,
         params: IdVec,
         is_macro: bool,
         macro_stmts: IdVec,
+    },
+    ArrayAccess {
+        arr: Id,
+        index: Id,
     },
     Unquote(Id),
     // Add(Id, Id),
@@ -726,11 +753,6 @@ pub enum Node {
     // And(Id, Id),
     // Or(Id, Id),
     // Not(Id),
-    // If {
-    //     cond: Id,
-    //     true_stmts: IdVec,
-    //     false_stmts: Option<IdVec>,
-    // },
     // While {
     //     cond: Id,
     //     stmts: IdVec,
@@ -772,19 +794,6 @@ impl<'a> Parser<'a> {
         let sym_f64 = lexer.string_interner.get_or_intern("f64");
         let sym_bool = lexer.string_interner.get_or_intern("bool");
         let sym_string = lexer.string_interner.get_or_intern("string");
-        // let sym_plus = lexer.string_interner.get_or_intern("+");
-        // let sym_minus = lexer.string_interner.get_or_intern("-");
-        // let sym_mul = lexer.string_interner.get_or_intern("*");
-        // let sym_div = lexer.string_interner.get_or_intern("/");
-        // let sym_lt = lexer.string_interner.get_or_intern("<");
-        // let sym_gt = lexer.string_interner.get_or_intern(">");
-        // let sym_eq = lexer.string_interner.get_or_intern("=");
-        // let sym_and = lexer.string_interner.get_or_intern("and");
-        // let sym_or = lexer.string_interner.get_or_intern("or");
-        // let sym_not = lexer.string_interner.get_or_intern("not");
-        // let sym_if = lexer.string_interner.get_or_intern("if");
-        // let sym_while = lexer.string_interner.get_or_intern("while");
-        // let sym_extern = lexer.string_interner.get_or_intern("extern");
 
         let scopes = vec![Scope {
             parent: None,
@@ -803,6 +812,7 @@ impl<'a> Parser<'a> {
             copying: false,
             top_level: Default::default(),
             macros: Default::default(),
+            externs: Default::default(),
             calls: Default::default(),
             top_level_map: Default::default(),
             id_vecs: Default::default(),
@@ -817,18 +827,6 @@ impl<'a> Parser<'a> {
             sym_f64,
             sym_bool,
             sym_string,
-            // sym_plus,
-            // sym_minus,
-            // sym_mul,
-            // sym_div,
-            // sym_lt,
-            // sym_gt,
-            // sym_eq,
-            // sym_and,
-            // sym_or,
-            // sym_not,
-            // sym_while,
-            // sym_extern,
         }
     }
 
@@ -916,7 +914,7 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `fn`
 
                 self.expect(&Token::LParen)?;
-                let input_tys = self.parse_params()?;
+                let input_tys = self.parse_params(false)?;
                 self.expect(&Token::RParen)?;
 
                 let return_ty = self.parse_type()?;
@@ -942,7 +940,7 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `struct`
 
                 self.expect(&Token::LCurly)?;
-                let params = self.parse_params()?;
+                let params = self.parse_params(false)?;
                 let range = self.expect_range(start, Token::RCurly)?;
 
                 Ok(self.push_node(
@@ -958,7 +956,7 @@ impl<'a> Parser<'a> {
                 self.lexer.pop(); // `enum`
 
                 self.expect(&Token::LCurly)?;
-                let params = self.parse_params()?;
+                let params = self.parse_params(false)?;
                 let range = self.expect_range(start, Token::RCurly)?;
 
                 Ok(self.push_node(
@@ -968,6 +966,16 @@ impl<'a> Parser<'a> {
                         copied_from: None,
                     }),
                 ))
+            }
+            Token::LSquare => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `[`
+                self.expect(&Token::RSquare)?;
+
+                let array_ty = self.parse_type()?;
+                let range = Range::new(start, self.ranges[array_ty].end);
+
+                Ok(self.push_node(range, Node::TypeLiteral(Type::Array(array_ty))))
             }
             Token::Asterisk => {
                 let start = self.lexer.top.range.start;
@@ -1206,20 +1214,34 @@ impl<'a> Parser<'a> {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `{`
 
-                let params = self.parse_value_params()?;
+                let params = self.parse_value_params(false)?;
 
                 let range = self.expect_range(start, Token::RCurly)?;
                 Ok(self.push_node(range, Node::StructLiteral { name: None, params }))
+            }
+            Token::LSquare => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `[`
+                self.expect(&Token::RSquare)?;
+
+                self.expect(&Token::LCurly)?;
+
+                let params = self.parse_value_params(false)?;
+
+                let range = self.expect_range(start, Token::RCurly)?;
+
+                Ok(self.push_node(range, Node::ArrayLiteral(params)))
             }
             _ => {
                 let start = self.lexer.top.range.start;
 
                 let mut value = self.parse_lvalue()?;
 
-                // dot / function call?
+                // dot / function call / array access?
                 while self.lexer.top.tok == Token::Dot
                     || self.lexer.top.tok == Token::LParen
                     || self.lexer.top.tok == Token::LCurly
+                    || self.lexer.top.tok == Token::LSquare
                     || self.lexer.top.tok == Token::Bang
                 {
                     if self.lexer.top.tok == Token::Dot {
@@ -1249,7 +1271,7 @@ impl<'a> Parser<'a> {
                         let ct_params = if self.lexer.top.tok == Token::Bang {
                             self.lexer.pop();
                             self.expect(&Token::LParen)?;
-                            let params = self.parse_value_params()?;
+                            let params = self.parse_value_params(true)?;
                             self.expect(&Token::RParen)?;
                             Some(params)
                         } else {
@@ -1257,7 +1279,7 @@ impl<'a> Parser<'a> {
                         };
 
                         self.expect(&Token::LParen)?;
-                        let params = self.parse_value_params()?;
+                        let params = self.parse_value_params(false)?;
                         let range = self.expect_range(start, Token::RParen)?;
 
                         let macro_stmts = self.push_id_vec(Vec::new());
@@ -1273,8 +1295,15 @@ impl<'a> Parser<'a> {
                         );
 
                         self.calls.push(value);
-                    } else {
+                    } else if self.lexer.top.tok == Token::LSquare {
+                        self.lexer.pop(); // `[`
+                        let index = self.parse_expression()?;
+                        let range = self.expect_range(start, Token::RSquare)?;
+                        value = self.push_node(range, Node::ArrayAccess { arr: value, index });
+                    } else if self.lexer.top.tok == Token::LCurly {
                         todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
+                    } else {
+                        todo!("unhandled case for parser")
                     }
                 }
 
@@ -1489,7 +1518,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_params(&mut self) -> Result<IdVec, CompileError> {
+    fn parse_params(&mut self, is_ct: bool) -> Result<IdVec, CompileError> {
         let mut params = Vec::new();
 
         let mut index = 0;
@@ -1510,6 +1539,8 @@ impl<'a> Parser<'a> {
                     name: name_sym,
                     ty,
                     index,
+                    is_ct,
+                    ct_link: None,
                 },
             );
             self.scope_insert(name_sym, param);
@@ -1532,7 +1563,7 @@ impl<'a> Parser<'a> {
         IdVec(self.id_vecs.len() - 1)
     }
 
-    fn parse_value_param(&mut self, index: u16) -> Result<Id, CompileError> {
+    fn parse_value_param(&mut self, index: u16, is_ct: bool) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
         let name = if let Token::Symbol(_) = self.lexer.top.tok {
@@ -1552,16 +1583,21 @@ impl<'a> Parser<'a> {
 
         Ok(self.push_node(
             Range::new(start, end),
-            Node::ValueParam { name, value, index },
+            Node::ValueParam {
+                name,
+                value,
+                index,
+                is_ct,
+            },
         ))
     }
 
-    fn parse_value_params(&mut self) -> Result<IdVec, CompileError> {
+    fn parse_value_params(&mut self, is_ct: bool) -> Result<IdVec, CompileError> {
         let mut params = Vec::new();
 
         let mut vp_index = 0;
         while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
-            params.push(self.parse_value_param(vp_index)?);
+            params.push(self.parse_value_param(vp_index, is_ct)?);
             vp_index += 1;
 
             if self.lexer.top.tok == Token::Comma {
@@ -1593,16 +1629,15 @@ impl<'a> Parser<'a> {
         let ct_params = if self.lexer.top.tok == Token::Bang {
             self.lexer.pop();
             self.expect(&Token::LParen)?;
-            let ct_params = self.parse_params()?;
+            let ct_params = self.parse_params(true)?;
             self.expect(&Token::RParen)?;
             Some(ct_params)
         } else {
             None
         };
 
-        self.lexer.top.range.start;
         self.expect(&Token::LParen)?;
-        let params = self.parse_params()?;
+        let params = self.parse_params(false)?;
         self.expect(&Token::RParen)?;
 
         let return_ty = if self.lexer.top.tok != Token::LCurly {
@@ -1664,7 +1699,7 @@ impl<'a> Parser<'a> {
                 let name = self.parse_sym()?;
 
                 self.expect(&Token::LCurly)?;
-                let params = self.parse_params()?;
+                let params = self.parse_params(false)?;
                 let range = self.expect_range(start, Token::RCurly)?;
 
                 let id = self.push_node(range, Node::Enum { name, params });
@@ -1674,6 +1709,34 @@ impl<'a> Parser<'a> {
                 }
 
                 Ok(id)
+            }
+            Token::Extern => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `extern`
+
+                let name = self.parse_sym()?;
+
+                self.expect(&Token::LParen)?;
+                let params = self.parse_params(false)?;
+                self.expect(&Token::RParen)?;
+
+                let return_ty = self.parse_type()?;
+
+                let range = self.expect_range(start, Token::Semicolon)?;
+
+                let ext_id = self.push_node(
+                    range,
+                    Node::Extern {
+                        name,
+                        params,
+                        return_ty,
+                    },
+                );
+                self.scope_insert(name, ext_id);
+                self.externs.push(ext_id);
+                self.top_level.push(ext_id);
+
+                Ok(ext_id)
             }
             Token::Fn | Token::Macro => self.parse_fn(start),
             _ => Err(CompileError::from_string(
@@ -1690,7 +1753,7 @@ impl<'a> Parser<'a> {
         let ct_params = if self.lexer.top.tok == Token::Bang {
             self.lexer.pop();
             self.expect(&Token::LParen)?;
-            let params = self.parse_params()?;
+            let params = self.parse_params(true)?;
             self.expect(&Token::RParen)?;
             Some(params)
         } else {
@@ -1698,7 +1761,7 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&Token::LCurly)?;
-        let params = self.parse_params()?;
+        let params = self.parse_params(false)?;
         let range = self.expect_range(start, Token::RCurly)?;
 
         let id = self.push_node(

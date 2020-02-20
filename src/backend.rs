@@ -56,7 +56,8 @@ impl<'a> DerefMut for Builder<'a> {
 pub enum Value {
     Unassigned,
     None,
-    FuncRef(Sym),
+    FuncSym(Sym),
+    FuncRef(FuncRef),
     Value(CraneliftValue),
     // todo(chad): not everything needs to a stack slot
     // using SSA Values where possible might be more efficient
@@ -92,7 +93,7 @@ impl Value {
     ) -> CraneliftValue {
         match self {
             Value::Value(v) => *v,
-            Value::FuncRef(sym) => backend.builder.ins().iconst(types::I64, *sym as i64),
+            Value::FuncSym(sym) => backend.builder.ins().iconst(types::I64, *sym as i64),
             _ => todo!("as_value_relaxed for {:?}", self),
         }
     }
@@ -197,7 +198,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
     //         match self.semantic.parser.nodes[topo] {
     //             Node::Func { name, .. } => {
-    //                 self.values[topo] = Value::FuncRef(name);
+    //                 self.values[topo] = Value::FuncSym(name);
     //             }
     //             _ => {}
     //         };
@@ -273,6 +274,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
                     jit_builder.symbol("__macro_insert", macro_insert as *const u8);
                     jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
+                    jit_builder.symbol("print_int", print_int as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
                     }
@@ -295,7 +297,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(name));
                 let func_sym = self.get_symbol(func_name.clone());
 
-                self.values[id] = Value::FuncRef(func_sym);
+                self.values[id] = Value::FuncSym(func_sym);
 
                 // println!("compiling func {}", func_name);
 
@@ -383,6 +385,49 @@ impl<'a, 'b> Backend<'a, 'b> {
                     module.declare_func_in_func(func_id, &mut builder.func)
                 };
 
+                // declare externs
+                for ext in self.semantic.parser.externs.clone() {
+                    let mut sig = module.make_signature();
+
+                    let (name, params, return_ty) = match self.semantic.parser.nodes[ext] {
+                        Node::Extern {
+                            name,
+                            params,
+                            return_ty,
+                        } => (name, params, return_ty),
+                        _ => unreachable!(),
+                    };
+
+                    let return_size = type_size(&self.semantic, &module, return_ty);
+                    if return_size > 0 {
+                        sig.returns.push(AbiParam::new(into_cranelift_type(
+                            &self.semantic,
+                            return_ty,
+                        )?));
+                    }
+
+                    for param in self.semantic.parser.id_vec(params).clone() {
+                        sig.params
+                            .push(AbiParam::new(into_cranelift_type(&self.semantic, param)?));
+                    }
+
+                    let name = self
+                        .semantic
+                        .parser
+                        .lexer
+                        .string_interner
+                        .resolve(name)
+                        .unwrap()
+                        .to_string();
+
+                    let func_id = module
+                        .declare_function(&name, Linkage::Import, &sig)
+                        .unwrap();
+
+                    self.values[ext] =
+                        Value::FuncRef(module.declare_func_in_func(func_id, &mut builder.func));
+                }
+
                 let mut fb = FunctionBackend {
                     semantic: &mut self.semantic,
                     values: &mut self.values,
@@ -417,6 +462,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.values[id] = Value::None;
                 Ok(())
             }
+            Node::Extern { .. } => Ok(()),
             _ => Err(CompileError::from_string(
                 format!("Unhandled node: {}", self.semantic.parser.debug(id)),
                 self.semantic.parser.ranges[id],
@@ -607,8 +653,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     // For instance, the constant integer 3 would likely be just the value, and not a pointer.
     // However a field access (or even a load) needs to always be returned by pointer, because it might refer to a struct literal.
     // Some nodes (like const int above) don't usually return a pointer, but they might need to for other reasons,
-    // e.g. they need their address to be taken. In that case we store that fact in the 'node_has_slot' vec.
-    // Also symbols won't know whether they have a local or not because it depends what they're referencing. So 'node_has_slot' is handy there too.
+    // e.g. they need their address to be taken. In that case we store that fact in the 'node_is_addressable' vec.
+    // Also symbols won't know whether they have a local or not because it depends what they're referencing. So 'node_is_addressable' is handy there too.
     fn rvalue_is_ptr(&mut self, id: Id) -> bool {
         if self.semantic.parser.node_is_addressable[id] {
             return true;
@@ -619,6 +665,10 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::ValueParam { value, .. } => self.rvalue_is_ptr(value),
             Node::Field { .. } => true,
             Node::Let { .. } => true,
+            Node::DeclParam {
+                ct_link: Some(ct_link),
+                ..
+            } => self.rvalue_is_ptr(ct_link),
             _ => false,
         }
     }
@@ -626,7 +676,7 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
     fn as_value(&mut self, id: Id) -> CraneliftValue {
         match self.values[id] {
             Value::Value(v) => Some(v),
-            Value::FuncRef(sym) => Some(self.builder.ins().iconst(types::I64, sym as i64)),
+            Value::FuncSym(sym) => Some(self.builder.ins().iconst(types::I64, sym as i64)),
             _ => None,
         }
         .expect(&format!(
@@ -849,6 +899,8 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             Node::Symbol(sym) => {
                 let resolved = self.semantic.scope_get(sym, id)?;
                 self.compile_id(resolved)?;
+                self.semantic.parser.node_is_addressable[id] =
+                    self.semantic.parser.node_is_addressable[resolved];
                 self.values[id] = self.values[resolved].clone();
 
                 Ok(())
@@ -1053,34 +1105,45 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
                 Ok(())
             }
             Node::DeclParam {
-                name: _, // Sym
-                ty: _,   // Id
-                index,   // u16
+                name: _,  // Sym
+                ty: _,    // Id
+                index,    // u16
+                is_ct: _, // bool
+                ct_link,  // Option<Id>
             } => {
-                // we need our own storage
-                let size = type_size(&self.semantic, &self.module, id);
-                let slot = self.builder.create_stack_slot(StackSlotData {
-                    kind: StackSlotKind::ExplicitSlot,
-                    size,
-                    offset: None,
-                });
+                if let Some(ct_link) = ct_link {
+                    self.compile_id(ct_link)?;
+                    self.values[id] = self.values[ct_link];
 
-                let slot_addr =
+                    self.semantic.parser.node_is_addressable[id] =
+                        self.semantic.parser.node_is_addressable[ct_link];
+
+                    Ok(())
+                } else {
+                    // we need our own storage
+                    let size = type_size(&self.semantic, &self.module, id);
+                    let slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size,
+                        offset: None,
+                    });
+
+                    let slot_addr =
+                        self.builder
+                            .ins()
+                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let value = Value::Value(slot_addr);
+
+                    let params = self.builder.ebb_params(self.current_block);
+                    let param_value = params[index as usize];
                     self.builder
                         .ins()
-                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
-                let value = Value::Value(slot_addr);
+                        .store(MemFlags::new(), param_value, slot_addr, 0);
 
-                let params = self.builder.ebb_params(self.current_block);
-                let param_value = params[index as usize];
+                    self.values[id] = value;
 
-                self.builder
-                    .ins()
-                    .store(MemFlags::new(), param_value, slot_addr, 0);
-
-                self.values[id] = value;
-
-                Ok(())
+                    Ok(())
+                }
             }
             Node::ValueParam {
                 name: _, // Sym
@@ -1246,6 +1309,89 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
 
                 Ok(())
             }
+            Node::ArrayLiteral(elements) => {
+                let ty = match self.semantic.types[id] {
+                    Type::Array(ty) => ty,
+                    _ => unreachable!(),
+                };
+
+                let element_count = self.semantic.parser.id_vec(elements).len();
+
+                let len_value = self.builder.ins().iconst(types::I64, element_count as i64);
+
+                let struct_addr_value = {
+                    let element_size = type_size(&self.semantic, &self.module, ty);
+                    let struct_size =
+                        type_size(&self.semantic, &self.module, ty) * element_count as u32;
+                    let struct_slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size: struct_size,
+                        offset: None,
+                    });
+                    let struct_slot_addr = self.builder.ins().stack_addr(
+                        self.module.isa().pointer_type(),
+                        struct_slot,
+                        0,
+                    );
+                    let struct_addr_value = Value::Value(struct_slot_addr);
+
+                    let mut offset = 0;
+                    for value in self.semantic.parser.id_vec(elements).clone() {
+                        self.compile_id(value)?;
+                        self.store_with_offset(value, &struct_addr_value, offset);
+                        offset += element_size as i32;
+                    }
+
+                    struct_slot_addr
+                };
+
+                let size = type_size(&self.semantic, &self.module, id);
+                let struct_slot = self.builder.create_stack_slot(StackSlotData {
+                    kind: StackSlotKind::ExplicitSlot,
+                    size,
+                    offset: None,
+                });
+                let dest_addr =
+                    self.builder
+                        .ins()
+                        .stack_addr(self.module.isa().pointer_type(), struct_slot, 0);
+
+                // store the length
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), len_value, dest_addr, 0);
+
+                // store the ptr
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), struct_addr_value, dest_addr, 8);
+
+                self.values[id] = Value::Value(dest_addr);
+
+                Ok(())
+            }
+            Node::ArrayAccess { arr, index } => {
+                self.compile_id(arr)?;
+                self.compile_id(index)?;
+
+                let struct_ptr = self.values[arr].as_addr().as_value_relaxed(self);
+                let data_ptr = self.builder.ins().load(
+                    self.module.isa().pointer_type(),
+                    MemFlags::new(),
+                    struct_ptr,
+                    8,
+                );
+
+                let element_size = type_size(&self.semantic, &self.module, id);
+                let element_size = self.builder.ins().iconst(types::I64, element_size as i64);
+
+                let index = self.rvalue(index);
+                let offset = self.builder.ins().imul(element_size, index);
+
+                self.values[id] = Value::Value(self.builder.ins().iadd(data_ptr, offset));
+
+                Ok(())
+            }
             Node::TypeLiteral(_) => {
                 self.values[id] = Value::None;
                 Ok(())
@@ -1269,8 +1415,32 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
             self.compile_id(*param)?;
         }
 
+        let func_ty = self.semantic.types[name];
+        let return_ty = match func_ty {
+            Type::Func { return_ty, .. } => Some(return_ty),
+            _ => None,
+        }
+        .unwrap();
+        let return_size = type_size(&self.semantic, &self.module, return_ty);
+
+        // direct call?
+        if let Value::FuncRef(fr) = self.values[name] {
+            let cranelift_params = params
+                .iter()
+                .map(|param| self.rvalue(*param))
+                .collect::<Vec<_>>();
+
+            let call_inst = self.builder.ins().call(fr, &cranelift_params);
+            if return_size > 0 {
+                let value = self.builder.func.dfg.inst_results(call_inst)[0];
+                self.set_value(id, value);
+            }
+
+            return Ok(());
+        }
+
         let cranelift_param = match &self.values[name] {
-            Value::FuncRef(fr) => self.builder.ins().iconst(types::I64, fr.to_usize() as i64),
+            Value::FuncSym(fr) => self.builder.ins().iconst(types::I64, fr.to_usize() as i64),
             Value::Value(_) => self.rvalue(name),
             _ => unreachable!("unrecognized Value type in codegen Node::Call"),
         };
@@ -1282,20 +1452,12 @@ impl<'a, 'b, 'c> FunctionBackend<'a, 'b, 'c> {
         let value = self.builder.func.dfg.inst_results(call_inst)[0];
 
         // Now call indirect
-        let func_ty = self.semantic.types[name];
-        let return_ty = match func_ty {
-            Type::Func { return_ty, .. } => Some(return_ty),
-            _ => None,
-        }
-        .unwrap();
-
         let mut sig = self.module.make_signature();
         for param in params.iter() {
             sig.params
                 .push(AbiParam::new(into_cranelift_type(&self.semantic, *param)?));
         }
 
-        let return_size = type_size(&self.semantic, &self.module, return_ty);
         if return_size > 0 {
             sig.returns.push(AbiParam::new(into_cranelift_type(
                 &self.semantic,
@@ -1382,6 +1544,8 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
             let tag_size = ENUM_TAG_SIZE_BYTES;
             tag_size + biggest_param
         }
+        // ptr + 64-bit length
+        Type::Array(_) => module.isa().pointer_bytes() as u32 + 8,
         _ => todo!(
             "type_size for {:?} ({})",
             &semantic.types[id],
@@ -1397,7 +1561,7 @@ fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
 fn prepare_unquote(
     semantic: *mut Semantic,
     is_unquote_code: i64,
-    unquote_id: Id,
+    _unquote_id: Id, // todo(chad): remove this
     address: *const u8,
 ) {
     let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
@@ -1466,4 +1630,8 @@ fn macro_insert(semantic: *mut Semantic, stmts: Id) {
 
     let insertion_point = semantic.parser.id_vec_mut(insertion_point);
     insertion_point.extend(inserted_stmts.iter());
+}
+
+fn print_int(n: i64) {
+    println!("{}", n);
 }

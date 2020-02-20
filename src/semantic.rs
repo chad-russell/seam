@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
 
 type Sym = usize;
 
@@ -282,11 +282,12 @@ impl<'a> Semantic<'a> {
                     .enumerate()
                     .map(|(_index, id)| {
                         let (name, ty, index) = match &self.parser.nodes[*id] {
-                            Node::DeclParam { name, ty, index } => Some((*name, *ty, *index)),
+                            Node::DeclParam { name, ty, index, .. } => Some((*name, *ty, *index)),
                             Node::ValueParam {
                                 name,
                                 value: _,
                                 index,
+                                is_ct: false,
                             } => Some((name.unwrap(), *id, *index)),
                             _ => None,
                         }
@@ -313,6 +314,27 @@ impl<'a> Semantic<'a> {
                     )),
                 }
             }
+            Node::ArrayAccess { arr, index } => {
+                // just like field accesses
+                self.parser.node_is_addressable[id] = true;
+
+                // todo(chad): auto-deref?
+                self.assign_type(arr)?;
+                self.assign_type(index)?;
+
+                let array_ty = match self.types[arr] {
+                    Type::Array(ty) => {
+                        Ok(ty)
+                    },
+                    _ => Err(CompileError::from_string(format!("Cannot perform array access on non-array type {:?}", &self.types[id]), self.parser.ranges[id]))
+                }?;
+                self.match_types(id, array_ty);
+
+                // todo(chad): assert that `index` has i64 type
+                self.types[index] = Type::Basic(BasicType::I64);
+
+                Ok(())
+            }
             Node::StructLiteral { name: _, params } => {
                 // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
                 self.parser.node_is_addressable[id] = true;
@@ -325,6 +347,25 @@ impl<'a> Semantic<'a> {
                     params: params.clone(),
                     copied_from: None,
                 };
+
+                Ok(())
+            }
+            Node::ArrayLiteral(params) => {
+                // todo(chad): @Performance this does not always need to be true, see comment in backend (compile_id on Node::StructLiteral)
+                self.parser.node_is_addressable[id] = true;
+
+                let params = self.parser.id_vec(params).clone();
+
+                // todo(chad): Allow zero-element array literals?
+                let matcher = params.first()
+                    .cloned()
+                    .ok_or_else(|| CompileError::from_string("Cannot have a zero-element array literal", self.parser.ranges[id]))?;
+                for &param in params.iter() {
+                    self.assign_type(param)?;
+                    self.match_types(param, matcher);
+                }
+
+                self.types[id] = Type::Array(matcher);
 
                 Ok(())
             }
@@ -411,12 +452,38 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
+            Node::Extern {
+                name: _,
+                params,
+                return_ty,
+            } => {
+                for param in self.parser.id_vec(params).clone() {
+                    self.assign_type(param)?;
+                }
+                self.assign_type(return_ty)?;
+
+                self.types[id] = Type::Func {
+                    return_ty,
+                    input_tys: params,
+                    copied_from: None
+                };
+
+                Ok(())
+            }
             Node::DeclParam {
                 name: _,  // Sym
                 ty,       // Id
-                index: _, //  u16
+                index: _, // u16
+                is_ct: _, // bool
+                ct_link,
             } => {
                 self.assign_type(ty)?;
+
+                if let Some(ct_link) = ct_link {
+                    self.assign_type(ct_link)?;
+                    self.match_types(id, ct_link);
+                }
+
                 self.match_types(id, ty);
                 Ok(())
             }
@@ -478,9 +545,9 @@ impl<'a> Semantic<'a> {
                     Type::Basic(_) => {
                         self.types[id] = ty.clone();
                     }
-                    Type::Pointer(ty) => {
-                        self.assign_type(ty)?;
-                        self.types[id] = Type::Pointer(ty);
+                    Type::Pointer(pointer_ty) => {
+                        self.assign_type(pointer_ty)?;
+                        self.types[id] = ty.clone();
                     }
                     Type::String => {
                         self.types[id] = Type::String;
@@ -512,6 +579,10 @@ impl<'a> Semantic<'a> {
                             self.assign_type(ty)?;
                         }
 
+                        self.types[id] = ty.clone();
+                    }
+                    Type::Array(array_ty) => {
+                        self.assign_type(array_ty)?;
                         self.types[id] = ty.clone();
                     }
                     Type::Code => {
@@ -554,7 +625,7 @@ impl<'a> Semantic<'a> {
                         // otherwise what the heck are we trying to call?
                         _ => {
                             return Err(CompileError::from_string(
-                                &format!("Cannot call a non-func: {:?}", &self.parser.nodes[id]),
+                                &format!("Cannot call a non-func: {:?}", &self.types[resolved_func]),
                                 self.parser.ranges[id],
                             ))
                         }
@@ -582,18 +653,28 @@ impl<'a> Semantic<'a> {
                     let given = ct_params
                         .map(|p| self.parser.id_vec(p).clone())
                         .unwrap_or(Vec::new());
-                    let decl = match &self.parser.nodes[resolved_func] {
+                    let decl_id_vec = *match &self.parser.nodes[resolved_func] {
                         Node::Func { ct_params, .. } => ct_params,
                         _ => unreachable!(),
                     };
-                    let decl = decl
+                    let decl = decl_id_vec
                         .map(|p| self.parser.id_vec(p).clone())
                         .unwrap_or(Vec::new());
 
-                    for (g, d) in given.iter().zip(decl.iter()) {
+                    for (index, (g, d)) in given.iter().zip(decl.iter()).enumerate() {
                         self.assign_type(*d)?;
                         self.assign_type(*g)?;
                         self.match_types(*g, *d);
+
+                        match self.types[*d] {
+                            Type::Type => (),
+                            _ => match self.parser.nodes.get_mut(decl[index]).unwrap() {
+                                Node::DeclParam { ct_link, .. } => {
+                                    *ct_link = Some(*g);
+                                },
+                                _ => unreachable!()
+                            }
+                        }
                     }
                 }
 
@@ -788,7 +869,11 @@ impl<'a> Semantic<'a> {
             Node::Symbol(_) => true,
             Node::Ref(_) => true,
             Node::Load(_) => true,
-            _ => false,
+            Node::StructLiteral { .. } => true,
+            _ => {
+                println!("{:?} is not an expression", self.parser.nodes[id]);
+                false
+            }
         };
 
         let range = self.parser.ranges[id];

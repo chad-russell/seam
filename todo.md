@@ -1,6 +1,8 @@
 # TODO
 
-- [x] basic enum support
+- [ ] redo macros the rust way, just accept and return a token stream
+- [ ] debugging
+- [ ] basic enum support
   - [x] set enum tag during enum literal construction
   - [x] set enum tag when assigning to field through a dot
   - [ ] support `.tag` pseudo-property
@@ -11,24 +13,24 @@
   - [ ] for enums
   - [x] copy functions/structs when instantiating so we can do multiple
   - [ ] baking
-  - [ ] non-type (constant value) params
+  - [x] non-type (constant value) params
   - [x] check conflicts during unification
-- [ ] structs as function parameters / return values
-  - [ ] structs as compile-time parameters / return values
-  - [ ] follow C ABI, at least for extern functions
 - [ ] first-class types
   - [ ] in generics we should be able to do compile-time logic on the `T` type that doesn't make it into the final executable
+    - [ ] should be able to pass into a function that runs at compile-time only for example
   - [ ] same with anything that comes as the result of `typeof`
-- [ ] arrays
 - [ ] defer
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] math (binary operations)
-- [ ] void return type
 - [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
-- [x] if
+- [ ] if
+  - [x] basic if/else statement functionality
   - [ ] as value expression
   - [ ] `else if`
 - [ ] short-circuit logical `and` and `or`
 - [ ] while
 - [ ] for (with macros?)
 - [ ] f32/f64
+- [ ] structs as function parameters / return values
+  - [ ] structs as compile-time parameters / return values
+  - [ ] follow C ABI, at least for extern functions
