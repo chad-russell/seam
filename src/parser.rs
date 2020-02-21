@@ -232,16 +232,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // pub fn update_source(&mut self, source: &'a str) {
-    //     self.original_source = source;
-    //     self.source = source;
-    //     self.loc = Default::default();
-    //     self.top = Lexeme::new(Token::EOF, Default::default());
-    //     self.second = Lexeme::new(Token::EOF, Default::default());
+    #[allow(dead_code)]
+    pub fn update_source(&mut self, source: &'a str) {
+        self.original_source = source;
+        self.source = source;
+        self.loc = Default::default();
+        self.top = Lexeme::new(Token::EOF, Default::default());
+        self.second = Lexeme::new(Token::EOF, Default::default());
 
-    //     self.pop();
-    //     self.pop();
-    // }
+        self.pop();
+        self.pop();
+    }
 
     pub fn update_source_for_copy(&mut self, source: &'a str, loc: Location) {
         self.source = source;
@@ -846,10 +847,11 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    // pub fn get_top_level(&self, name: impl Into<String>) -> Option<Id> {
-    //     let sym = self.lexer.string_interner.get(name.into()).unwrap();
-    //     self.top_level_map.get(&sym).map(|x| *x)
-    // }
+    #[allow(dead_code)]
+    pub fn get_top_level(&self, name: impl Into<String>) -> Option<Id> {
+        let sym = self.lexer.string_interner.get(name.into()).unwrap();
+        self.top_level_map.get(&sym).map(|x| *x)
+    }
 
     pub fn scope_insert(&mut self, sym: Sym, id: Id) {
         self.scopes[self.top_scope].entries.insert(sym, id);

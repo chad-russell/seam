@@ -1,4 +1,3 @@
-use crate::backend::Backend;
 use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type, IdVec};
 
 type Sym = usize;
@@ -29,40 +28,6 @@ impl<'a> Semantic<'a> {
             macro_expansion_site: None,
             unquote_values: Vec::new(),
         }
-    }
-
-    pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
-        for tl in self.parser.top_level.clone() {
-            let is_poly_or_macro = match &self.parser.nodes[tl] {
-                Node::Func {
-                    ct_params,
-                    is_macro,
-                    ..
-                } => ct_params.is_some() || *is_macro,
-                Node::Struct { ct_params, .. } => ct_params.is_some(),
-                _ => false,
-            };
-
-            if !is_poly_or_macro {
-                self.assign_type(tl)?
-            }
-        }
-
-        self.unify_types(true)?;
-        if !self.type_matches.is_empty() && !self.type_matches[0].is_empty() {
-            CompileError::from_string(
-                "Failed to unify types",
-                self.parser.ranges[self.type_matches[0][0]],
-            );
-        }
-
-        // for (index, ty) in self.types.iter().enumerate() {
-        //     if !ty.is_concrete() {
-        //         println!("Unassigned type for {}", self.parser.debug(index));
-        //     }
-        // }
-
-        Ok(())
     }
 
     // fn handle_macros(&mut self) -> Result<(), CompileError> {
@@ -137,7 +102,7 @@ impl<'a> Semantic<'a> {
     //     Ok(())
     // }
 
-    fn assign_type(&mut self, id: usize) -> Result<(), CompileError> {
+    pub fn assign_type(&mut self, id: usize) -> Result<(), CompileError> {
         // idempotency
         let type_is_assigned = match &self.types[id] {
             Type::Unassigned => false,
@@ -408,12 +373,8 @@ impl<'a> Semantic<'a> {
                 return_ty, // Id,
                 stmts,     // IdVec,
                 returns,   // IdVec,
-                is_macro,  // bool,
+                is_macro: _,  // bool,
             } => {
-                if is_macro && !self.macro_phase {
-                    return Ok(());
-                }
-
                 if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
                         self.assign_type(ct_param)?;
@@ -1043,7 +1004,7 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn unify_types(&mut self, final_pass: bool) -> Result<(), CompileError> {
+    pub fn unify_types(&mut self, final_pass: bool) -> Result<(), CompileError> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
