@@ -14,6 +14,7 @@ fn main() -> Result<(), CompileError> {
     let mut semantic = Backend::bootstrap_to_semantic(&source)?;
     let backend = Backend::bootstrap_to_backend(&mut semantic)?;
 
+    println!("**** RUNTIME ****");
     let now = std::time::Instant::now();
     dbg!(backend.call_func("main"));
     let elapsed = now.elapsed();

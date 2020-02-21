@@ -429,6 +429,44 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 Ok(())
             }
+            Node::Symbol(sym) => {
+                let resolved = self.semantic.scope_get(sym, id)?;
+                self.compile_id(resolved)?;
+                self.semantic.parser.node_is_addressable[id] =
+                    self.semantic.parser.node_is_addressable[resolved];
+                self.values[id] = self.values[resolved].clone();
+
+                Ok(())
+            }
+            Node::Call {
+                name,           // Id
+                params,         // IdVec
+                is_macro,       // bool
+                macro_stmts: _, // IdVec
+                ..
+            } => {
+                if !is_macro {
+                    unreachable!();
+                }
+
+                self.values[id] = Value::None;
+
+                self.compile_id(name)?;
+
+                let params = self.semantic.parser.id_vec(params).clone();
+                let name = match self.semantic.parser.nodes[name] {
+                    Node::Symbol(sym) => sym,
+                    _ => unreachable!(),
+                };
+
+                let compiled_macro = self.build_hoisted_function(params, name)?;
+                let compiled_macro: fn(semantic: *mut Semantic) =
+                    unsafe { std::mem::transmute(compiled_macro) };
+                compiled_macro(self.semantic as *mut _);
+
+                Ok(())
+            }
+
             Node::TypeLiteral(_) => {
                 self.values[id] = Value::None;
                 Ok(())
@@ -444,8 +482,13 @@ impl<'a, 'b> Backend<'a, 'b> {
     pub fn build_hoisted_function(
         &mut self,
         params: Vec<Id>,
-        hoisting_name: Id,
+        hoisting_name: Sym,
     ) -> Result<*const u8, CompileError> {
+        println!(
+            "compiling hoisting function for {}",
+            self.resolve_symbol(hoisting_name)
+        );
+
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
             jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
@@ -534,11 +577,6 @@ impl<'a, 'b> Backend<'a, 'b> {
             module.declare_func_in_func(func_id, &mut ctx.func)
         };
 
-        // compile all top-level functions first
-        for id in self.semantic.topo.clone() {
-            self.compile_id(id)?;
-        }
-
         let mut func_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
@@ -589,7 +627,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         fb.builder.seal_all_blocks();
         fb.builder.finalize();
 
-        println!("{}", ctx.func.display(None));
+        // println!("{}", ctx.func.display(None));
 
         module.define_function(func, &mut ctx).unwrap();
         module.clear_context(&mut ctx);
@@ -999,31 +1037,16 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 Ok(())
             }
             Node::Call {
-                name,   // Id
-                params, // IdVec
-                is_macro, // bool
-                        // macro_stmts, // IdVec
+                name,        // Id
+                params,      // IdVec
+                is_macro,    // bool
+                macro_stmts, // IdVec
                 ..
             } => {
                 if is_macro {
-                    // for stmt in self.backend.semantic.parser.id_vec(macro_stmts).clone() {
-                    //     self.compile_id(stmt)?;
-                    // }
-
-                    self.compile_id(name)?;
-
-                    let params = self.backend.semantic.parser.id_vec(params).clone();
-                    let name = match self.backend.semantic.parser.nodes[name] {
-                        Node::Symbol(sym) => sym,
-                        _ => unreachable!(),
-                    };
-
-                    let compiled_macro = self.backend.build_hoisted_function(params, name)?;
-                    let compiled_macro: fn(semantic: *mut Semantic) =
-                        unsafe { std::mem::transmute(compiled_macro) };
-                    compiled_macro(self.backend.semantic as *mut _);
-
-                    // todo!("call macro");
+                    for stmt in self.backend.semantic.parser.id_vec(macro_stmts).clone() {
+                        self.compile_id(stmt)?;
+                    }
 
                     Ok(())
                 } else {

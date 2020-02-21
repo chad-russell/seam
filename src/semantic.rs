@@ -12,6 +12,7 @@ pub struct Semantic<'a> {
     pub type_matches: Vec<Vec<Id>>,
     pub macro_phase: bool,
     pub macro_expansion_site: Option<Id>, // todo(chad): make this just Id once we're confident it's always set
+    pub macro_calls: Vec<Id>,
     pub unquote_values: Vec<Node>,        // todo(chad): @ConstValue
 }
 
@@ -26,6 +27,7 @@ impl<'a> Semantic<'a> {
             type_matches: Vec::new(),
             macro_phase: false,
             macro_expansion_site: None,
+            macro_calls: Vec::new(),
             unquote_values: Vec::new(),
         }
     }
@@ -571,7 +573,12 @@ impl<'a> Semantic<'a> {
                     match self.parser.nodes.get_mut(id).unwrap() {
                         Node::Call { is_macro, .. } => *is_macro = true,
                         _ => unreachable!(),
-                    }
+                    };
+                }
+
+                if is_macro_call {
+                    self.topo.push(id);
+                    self.macro_calls.push(id);
                 }
 
                 for stmt in self.parser.id_vec(macro_stmts).clone() {

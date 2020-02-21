@@ -35,14 +35,24 @@ fn print_str(s: *string) i64 {
 //     y: bool,
 // }
 
+macro bar(n: i64) i64 {
+    print_str(&"bar");
+    print_int(n);
+    return n;
+}
+
 macro foo(n: i64) i64 {
-    print_str(&"compile-time wooo");
+    print_str(&"foo");
+    print_int(n);
+
+    bar(15);
+
     return n;
 }
 
 fn main() i64 {
     print_str(&"wooo");
-    foo(3);
+    foo(332);
     return 0;
 
     // let t: Ty = {
