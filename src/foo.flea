@@ -6,9 +6,64 @@ fn print_str(s: *string) i64 {
     return 0;
 }
 
-fn main() i64 {
-    print_str(&"hello");
+enum Ty {
+    I8: struct{},
+    I32: struct{},
+    I64: struct{},
+    F32: struct{},
+    F64: struct{},
+    String: struct{},
+    Pointer: *Ty,
+    Array: *Ty,
+    Struct: []struct {
+        name: string,
+        type: Ty,
+    },
+    Enum: []struct {
+        name: string,
+        type: Ty,
+    },
+    Func: struct {
+        input_types: []Ty,
+        return_type: *Ty,
+    },
+    Hack: []Ty,
+}
+
+enum Wtf {
+    x: string,
+    y: bool,
+}
+
+macro foo(s: *string) i64 {
+    print_str(&s);
     return 0;
+}
+
+fn main() i64 {
+    let t: Ty = {
+        Struct: []{
+            {
+                name: "foo",
+                type: { I8: {} },
+            },
+            {
+                name: "bar",
+                type: { I64: {} },
+            }
+        }
+    };
+    // print_str(&t.Struct[1].name);
+
+    foo(&t.Struct[1].name);
+    
+    return 0;
+
+    // let t: Ty = {
+    //     Struct: []{ I8: {} }
+    // };
+
+    // return 0;
 }
 
 // fn old_tests() i64 {

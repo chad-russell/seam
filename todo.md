@@ -5,7 +5,7 @@
 - [ ] basic enum support
   - [x] set enum tag during enum literal construction
   - [x] set enum tag when assigning to field through a dot
-  - [ ] support `.tag` pseudo-property
+  - [ ] support `#tag_of()`
   - [ ] check enum tag when accessing through a field
 - [ ] generics
   - [x] for functions
@@ -18,7 +18,7 @@
 - [ ] first-class types
   - [ ] in generics we should be able to do compile-time logic on the `T` type that doesn't make it into the final executable
     - [ ] should be able to pass into a function that runs at compile-time only for example
-  - [ ] same with anything that comes as the result of `typeof`
+  - [ ] same with anything that comes as the result of `type_of`
 - [ ] defer
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] math (binary operations)

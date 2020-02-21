@@ -388,48 +388,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     module.declare_func_in_func(func_id, &mut builder.func)
                 };
 
-                // declare externs
-                for ext in self.semantic.parser.externs.clone() {
-                    let mut sig = module.make_signature();
-
-                    let (name, params, return_ty) = match self.semantic.parser.nodes[ext] {
-                        Node::Extern {
-                            name,
-                            params,
-                            return_ty,
-                        } => (name, params, return_ty),
-                        _ => unreachable!(),
-                    };
-
-                    let return_size = type_size(&self.semantic, &module, return_ty);
-                    if return_size > 0 {
-                        sig.returns.push(AbiParam::new(into_cranelift_type(
-                            &self.semantic,
-                            return_ty,
-                        )?));
-                    }
-
-                    for param in self.semantic.parser.id_vec(params).clone() {
-                        sig.params
-                            .push(AbiParam::new(into_cranelift_type(&self.semantic, param)?));
-                    }
-
-                    let name = self
-                        .semantic
-                        .parser
-                        .lexer
-                        .string_interner
-                        .resolve(name)
-                        .unwrap()
-                        .to_string();
-
-                    let func_id = module
-                        .declare_function(&name, Linkage::Import, &sig)
-                        .unwrap();
-
-                    self.values[ext] =
-                        Value::FuncRef(module.declare_func_in_func(func_id, &mut builder.func));
-                }
+                declare_externs(&self.semantic, &mut module, &mut builder, &mut self.values)?;
 
                 let mut fb = FunctionBackend {
                     semantic: &mut self.semantic,
@@ -450,7 +409,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 builder.seal_all_blocks();
                 builder.finalize();
 
-                println!("{}", ctx.func.display(None));
+                // println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -482,6 +441,8 @@ impl<'a, 'b> Backend<'a, 'b> {
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
             jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
+            jit_builder.symbol("print_int", print_int as *const u8);
+            jit_builder.symbol("print_string", print_string as *const u8);
             for (&name, &ptr) in crate::backend::FUNC_PTRS.lock().unwrap().iter() {
                 jit_builder.symbol(self.resolve_symbol(name), ptr.0);
             }
@@ -573,6 +534,9 @@ impl<'a, 'b> Backend<'a, 'b> {
         let mut builder = Builder {
             builder: FunctionBuilder::new(&mut ctx.func, &mut self.func_ctx),
         };
+
+        declare_externs(&self.semantic, &mut module, &mut builder, &mut self.values)?;
+
         let ebb = builder.create_ebb();
         builder.switch_to_block(ebb);
         builder.append_ebb_params_for_function_params(ebb);
@@ -1668,6 +1632,53 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
     }
 }
 
+fn declare_externs<'a>(
+    semantic: &Semantic<'a>,
+    module: &mut Module<SimpleJITBackend>,
+    builder: &mut Builder,
+    values: &mut Vec<Value>,
+) -> Result<(), CompileError> {
+    for ext in semantic.parser.externs.clone() {
+        let mut sig = module.make_signature();
+
+        let (name, params, return_ty) = match semantic.parser.nodes[ext] {
+            Node::Extern {
+                name,
+                params,
+                return_ty,
+            } => (name, params, return_ty),
+            _ => unreachable!(),
+        };
+
+        let return_size = type_size(semantic, &module, return_ty);
+        if return_size > 0 {
+            sig.returns
+                .push(AbiParam::new(into_cranelift_type(semantic, return_ty)?));
+        }
+
+        for param in semantic.parser.id_vec(params).clone() {
+            sig.params
+                .push(AbiParam::new(into_cranelift_type(semantic, param)?));
+        }
+
+        let name = semantic
+            .parser
+            .lexer
+            .string_interner
+            .resolve(name)
+            .unwrap()
+            .to_string();
+
+        let func_id = module
+            .declare_function(&name, Linkage::Import, &sig)
+            .unwrap();
+
+        values[ext] = Value::FuncRef(module.declare_func_in_func(func_id, &mut builder.func));
+    }
+
+    Ok(())
+}
+
 fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
@@ -1753,4 +1764,5 @@ fn print_int(n: i64) {
 fn print_string(len: i64, bytes: *mut u8) {
     let s = unsafe { String::from_raw_parts(bytes, len as usize, len as usize) };
     println!("{}", s);
+    std::mem::forget(s);
 }

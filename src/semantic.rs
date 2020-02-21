@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type, IdVec};
 
 type Sym = usize;
 
@@ -32,8 +32,6 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
-        self.handle_macros()?;
-
         for tl in self.parser.top_level.clone() {
             let is_poly_or_macro = match &self.parser.nodes[tl] {
                 Node::Func {
@@ -67,77 +65,77 @@ impl<'a> Semantic<'a> {
         Ok(())
     }
 
-    fn handle_macros(&mut self) -> Result<(), CompileError> {
-        self.macro_phase = true;
+    // fn handle_macros(&mut self) -> Result<(), CompileError> {
+    //     self.macro_phase = true;
 
-        let mut backend = Backend::new(self);
-        for mac in backend.semantic.parser.macros.clone() {
-            backend.semantic.assign_type(mac)?;
-            backend.compile()?;
-        }
+    //     let mut backend = Backend::new(self);
+    //     for mac in backend.semantic.parser.macros.clone() {
+    //         backend.semantic.assign_type(mac)?;
+    //         backend.compile()?;
+    //     }
 
-        // todo(chad): ugh clone... this one could actually be expensive...
-        for call in backend.semantic.parser.calls.clone() {
-            let (name, params) = match backend.semantic.parser.nodes[call] {
-                // todo(chad): disallow generic macros?
-                Node::Call { name, params, .. } => (name, params),
-                _ => unreachable!(),
-            };
+    //     // todo(chad): ugh clone... this one could actually be expensive...
+    //     for call in backend.semantic.parser.calls.clone() {
+    //         let (name, params) = match backend.semantic.parser.nodes[call] {
+    //             // todo(chad): disallow generic macros?
+    //             Node::Call { name, params, .. } => (name, params),
+    //             _ => unreachable!(),
+    //         };
 
-            let resolved_func = backend.semantic.resolve(name)?;
-            let is_macro = match &backend.semantic.parser.nodes[resolved_func] {
-                Node::Func { is_macro, .. } => *is_macro,
-                _ => false,
-            };
+    //         let resolved_func = backend.semantic.resolve(name)?;
+    //         let is_macro = match &backend.semantic.parser.nodes[resolved_func] {
+    //             Node::Func { is_macro, .. } => *is_macro,
+    //             _ => false,
+    //         };
 
-            if !is_macro {
-                continue;
-            }
+    //         if !is_macro {
+    //             continue;
+    //         }
 
-            let (name, decl) = match &backend.semantic.parser.nodes[resolved_func] {
-                Node::Func { name, params, .. } => (*name, *params),
-                _ => unreachable!(),
-            };
+    //         let (name, decl) = match &backend.semantic.parser.nodes[resolved_func] {
+    //             Node::Func { name, params, .. } => (*name, *params),
+    //             _ => unreachable!(),
+    //         };
 
-            // resolve any constant params
-            let given = backend.semantic.parser.id_vec(params).clone();
-            let decl = backend.semantic.parser.id_vec(decl).clone();
+    //         // resolve any constant params
+    //         let given = backend.semantic.parser.id_vec(params).clone();
+    //         let decl = backend.semantic.parser.id_vec(decl).clone();
 
-            for (g, d) in given.iter().zip(decl.iter()) {
-                backend.semantic.assign_type(*d)?;
-                backend.semantic.assign_type(*g)?;
-                backend.semantic.match_types(*g, *d);
-            }
+    //         for (g, d) in given.iter().zip(decl.iter()) {
+    //             backend.semantic.assign_type(*d)?;
+    //             backend.semantic.assign_type(*g)?;
+    //             backend.semantic.match_types(*g, *d);
+    //         }
 
-            backend.semantic.unify_types(true)?;
+    //         backend.semantic.unify_types(true)?;
 
-            let maybe_hoisted: *const u8 = if !given.is_empty() {
-                // todo(chad): build constant 'includes', i.e. what else has to be pulled into the hoisted fn to support the const param
-                backend.build_hoisted_function(given, name)?
-            } else {
-                (crate::backend::FUNC_PTRS.lock().unwrap())[&name].0
-            };
+    //         let maybe_hoisted: *const u8 = if !given.is_empty() {
+    //             // todo(chad): build constant 'includes', i.e. what else has to be pulled into the hoisted fn to support the const param
+    //             backend.build_hoisted_function(given, name)?
+    //         } else {
+    //             (crate::backend::FUNC_PTRS.lock().unwrap())[&name].0
+    //         };
 
-            let f: fn(*const Semantic) = unsafe { std::mem::transmute(maybe_hoisted) };
+    //         let f: fn(*const Semantic) = unsafe { std::mem::transmute(maybe_hoisted) };
 
-            backend.semantic.macro_expansion_site = Some(call);
+    //         backend.semantic.macro_expansion_site = Some(call);
 
-            backend.semantic.unquote_values.clear();
-            backend.semantic.parser.parsed_unquotes.clear();
-            f(backend.semantic as _);
+    //         backend.semantic.unquote_values.clear();
+    //         backend.semantic.parser.parsed_unquotes.clear();
+    //         f(backend.semantic as _);
 
-            let unquotes = backend.semantic.parser.parsed_unquotes.clone();
-            let values = backend.semantic.unquote_values.clone();
-            for (unquote, value) in unquotes.iter().zip(values.iter()) {
-                backend.semantic.parser.nodes[*unquote] = *value;
-            }
-        }
+    //         let unquotes = backend.semantic.parser.parsed_unquotes.clone();
+    //         let values = backend.semantic.unquote_values.clone();
+    //         for (unquote, value) in unquotes.iter().zip(values.iter()) {
+    //             backend.semantic.parser.nodes[*unquote] = *value;
+    //         }
+    //     }
 
-        self.macro_phase = false;
-        self.topo.clear();
+    //     self.macro_phase = false;
+    //     self.topo.clear();
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     fn assign_type(&mut self, id: usize) -> Result<(), CompileError> {
         // idempotency
@@ -295,27 +293,7 @@ impl<'a> Semantic<'a> {
                         self.parser.ranges[base],
                     ),
                 )?;
-                let params = &self
-                    .parser
-                    .id_vec(params)
-                    .iter()
-                    .enumerate()
-                    .map(|(_index, id)| {
-                        let (name, ty, index) = match &self.parser.nodes[*id] {
-                            Node::DeclParam { name, ty, index, .. } => Some((*name, *ty, *index)),
-                            Node::ValueParam {
-                                name,
-                                value: _,
-                                index,
-                                is_ct: false,
-                            } => Some((name.unwrap(), *id, *index)),
-                            _ => None,
-                        }
-                        .unwrap();
-
-                        (name, (ty, index))
-                    })
-                    .collect::<BTreeMap<_, _>>();
+                let params = self.get_struct_params(params);
 
                 match params.get(&field_name) {
                     Some((ty, index)) => {
@@ -561,6 +539,8 @@ impl<'a> Semantic<'a> {
                 }
             }
             Node::TypeLiteral(ty) => {
+                self.types[id] = Type::Type;
+
                 match ty {
                     Type::Basic(_) => {
                         self.types[id] = ty.clone();
@@ -820,6 +800,30 @@ impl<'a> Semantic<'a> {
         }
     }
 
+    fn get_struct_params(&self, params: IdVec) -> BTreeMap<usize, (usize, u16)> {
+        self
+            .parser
+            .id_vec(params)
+            .iter()
+            .enumerate()
+            .map(|(_index, id)| {
+                let (name, ty, index) = match &self.parser.nodes[*id] {
+                    Node::DeclParam { name, ty, index, .. } => Some((*name, *ty, *index)),
+                    Node::ValueParam {
+                        name,
+                        value: _,
+                        index,
+                        is_ct: false,
+                    } => Some((name.unwrap(), *id, *index)),
+                    _ => None,
+                }
+                .unwrap();
+
+                (name, (ty, index))
+            })
+            .collect::<BTreeMap<_, _>>()
+    }
+
     fn deep_copy_fn(&mut self, id: Id) -> Id {
         // println!("copying function!");
 
@@ -949,10 +953,10 @@ impl<'a> Semantic<'a> {
             return;
         }
 
-        if self.types[ty2].is_concrete() && !self.types[ty1].is_concrete() {
+        if self.types[ty1] == Type::Unassigned {
             self.types[ty1] = self.types[ty2];
         }
-        if self.types[ty1].is_concrete() && !self.types[ty2].is_concrete() {
+        if self.types[ty2] == Type::Unassigned {
             self.types[ty2] = self.types[ty1];
         }
 
@@ -985,6 +989,12 @@ impl<'a> Semantic<'a> {
                     self.match_types(*ty1, *ty2);
                 }
             }
+            (Type::Struct { params: st, .. }, Type::Enum { params: et, .. }) => {
+                self.match_struct_to_enum(st, et);
+            }
+            (Type::Enum { params: et, .. }, Type::Struct { params: st, .. }) => {
+                self.match_struct_to_enum(st, et);
+            }
             (Type::Pointer(pt1), Type::Pointer(pt2)) => {
                 self.match_types(pt1, pt2);
             }
@@ -1009,6 +1019,19 @@ impl<'a> Semantic<'a> {
             }
             (_, _) => (),
         }
+    }
+
+    fn match_struct_to_enum(&mut self, st: IdVec, et: IdVec) {
+        let struct_params = self.get_struct_params(st);
+        let enum_params = self.get_struct_params(et);
+
+        let st = self.parser.id_vec(st).clone();
+        assert_eq!(st.len(), 1);
+
+        let (name, (st, _)) = struct_params.iter().next().unwrap();
+        let (et, _) = enum_params.get(name).unwrap();
+
+        self.match_types(*st, *et);
     }
 
     fn get_poly_copy(&self, id: Id) -> Option<Id> {
