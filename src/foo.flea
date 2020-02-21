@@ -36,10 +36,12 @@ fn print_str(s: *string) i64 {
 // }
 
 macro foo(n: i64) i64 {
+    print_str(&"compile-time wooo");
     return n;
 }
 
 fn main() i64 {
+    print_str(&"wooo");
     foo(3);
     return 0;
 

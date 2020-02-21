@@ -10,8 +10,6 @@ use cranelift_module::{default_libcall_names, DataContext, DataId, FuncId, Linka
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 
 use std::collections::BTreeMap;
-use std::ops::Deref;
-use std::ops::DerefMut;
 
 use std::sync::{Arc, Mutex};
 
@@ -591,7 +589,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         fb.builder.seal_all_blocks();
         fb.builder.finalize();
 
-        // println!("{}", ctx.func.display(None));
+        println!("{}", ctx.func.display(None));
 
         module.define_function(func, &mut ctx).unwrap();
         module.clear_context(&mut ctx);
@@ -1014,7 +1012,18 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     self.compile_id(name)?;
 
-                    // build_hoisted_function();
+                    let params = self.backend.semantic.parser.id_vec(params).clone();
+                    let name = match self.backend.semantic.parser.nodes[name] {
+                        Node::Symbol(sym) => sym,
+                        _ => unreachable!(),
+                    };
+
+                    let compiled_macro = self.backend.build_hoisted_function(params, name)?;
+                    let compiled_macro: fn(semantic: *mut Semantic) =
+                        unsafe { std::mem::transmute(compiled_macro) };
+                    compiled_macro(self.backend.semantic as *mut _);
+
+                    // todo!("call macro");
 
                     Ok(())
                 } else {

@@ -884,7 +884,7 @@ impl<'a> Semantic<'a> {
         copied
     }
 
-    fn resolve(&self, id: Id) -> Result<Id, CompileError> {
+    pub fn resolve(&self, id: Id) -> Result<Id, CompileError> {
         match &self.parser.nodes[id] {
             Node::Symbol(sym) => self.scope_get(*sym, id),
             _ => Ok(id),
