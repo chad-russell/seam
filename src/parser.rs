@@ -184,7 +184,7 @@ impl Lexeme {
 }
 
 #[derive(Debug)]
-struct PushedScope(Id);
+struct PushedScope(Id, bool);
 
 pub struct Lexer<'a> {
     pub string_interner: Box<StringInterner<Sym>>,
@@ -619,8 +619,12 @@ pub struct Parser<'a> {
     pub top_scope: Id,
     pub unquote_scope: Id,
 
-    pub returns: Vec<Id>,
+    pub function_scopes: Vec<Id>,
     pub macro_calls: Vec<Id>,
+    pub function_by_macro_call: BTreeMap<Id, Id>,
+    pub macro_calls_by_function: BTreeMap<Id, Vec<Id>>,
+
+    pub returns: Vec<Id>,
     pub string_literals: Vec<Id>,
     pub string_literal_offset: usize,
 
@@ -856,6 +860,7 @@ impl<'a> Parser<'a> {
             node_is_addressable: Default::default(),
             scopes: scopes,
             top_scope: 0,
+            function_scopes: vec![0],
             unquote_scope: 0,
             copying: false,
             top_level: Default::default(),
@@ -867,6 +872,8 @@ impl<'a> Parser<'a> {
             token_vecs: Default::default(),
             returns: Default::default(),
             macro_calls: Default::default(),
+            function_by_macro_call: Default::default(),
+            macro_calls_by_function: Default::default(),
             string_literals: Default::default(),
             string_literal_offset: 0,
             current_unquote: IdVec(0),
@@ -1238,7 +1245,7 @@ impl<'a> Parser<'a> {
                 self.unquote_scope = self.top_scope;
 
                 // open a new scope
-                let pushed_scope = self.push_scope();
+                let pushed_scope = self.push_scope(false);
 
                 self.expect(&Token::LCurly)?;
                 let mut stmts = Vec::new();
@@ -1261,7 +1268,7 @@ impl<'a> Parser<'a> {
                 self.unquote_scope = self.top_scope;
 
                 // open a new scope
-                let pushed_scope = self.push_scope();
+                let pushed_scope = self.push_scope(false);
 
                 self.expect(&Token::LCurly)?;
                 let mut stmts = Vec::new();
@@ -1404,7 +1411,14 @@ impl<'a> Parser<'a> {
                             },
                         );
 
+                        let cur_fun = *self.function_scopes.last().unwrap();
+
                         self.macro_calls.push(value);
+                        self.macro_calls_by_function
+                            .entry(cur_fun)
+                            .or_insert(Vec::new())
+                            .push(value);
+                        self.function_by_macro_call.insert(value, cur_fun);
                     } else if self.lexer.top.tok == Token::LCurly {
                         todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
                     } else {
@@ -1547,7 +1561,7 @@ impl<'a> Parser<'a> {
                 self.unquote_scope = self.top_scope;
 
                 // open a new scope
-                let pushed_scope = self.push_scope();
+                let pushed_scope = self.push_scope(false);
                 self.is_in_insert = true;
 
                 self.expect(&Token::LCurly)?;
@@ -1598,10 +1612,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push_scope(&mut self) -> PushedScope {
+    fn push_scope(&mut self, is_function_scope: bool) -> PushedScope {
         self.scopes.push(Scope::new(self.top_scope));
-        let pushed = PushedScope(self.top_scope);
+        let pushed = PushedScope(self.top_scope, is_function_scope);
         self.top_scope = self.scopes.len() - 1;
+
+        if is_function_scope {
+            self.function_scopes.push(self.top_scope);
+        }
 
         pushed
     }
@@ -1739,7 +1757,7 @@ impl<'a> Parser<'a> {
         let name = self.parse_sym()?;
 
         // open a new scope
-        let pushed_scope = self.push_scope();
+        let pushed_scope = self.push_scope(true);
         self.returns.clear();
 
         let ct_params = if self.lexer.top.tok == Token::LAngle {

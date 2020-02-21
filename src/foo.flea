@@ -1,10 +1,10 @@
-// extern print_int(i: i64) struct{};
-// extern print_string(len: i64, ptr: *i8) struct{};
+extern print_int(i: i64) struct{};
+extern print_string(len: i64, ptr: *i8) struct{};
 
-// fn print_str(s: *string) i64 {
-//     print_string(s.len, s.buf);
-//     return 0;
-// }
+fn print_str(s: *string) i64 {
+    print_string(s.len, s.buf);
+    return 0;
+}
 
 // enum Token {
 //     LParen: struct{},
@@ -67,15 +67,25 @@
 //     Hack: []Ty,
 // }
 
+bar!(let a = 3;);
+
+macro bar(t: Tokens) Tokens {
+    print_str(&"bar");
+    return t;
+}
+
 macro foo(t: Tokens) Tokens {
-    // print_str(&"foo");
+    print_str(&"foo");
+    bar!(let c = 9;);
+    print_int(c);
     return t;
 }
 
 fn main() i64 {
-    // print_str(&"main");
+    print_str(&"main");
     foo!(let a = 3;);
-    return a;
+    foo!(let b = 12;);
+    return b;
 }
 
 // fn old_tests() i64 {

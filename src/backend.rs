@@ -122,20 +122,54 @@ impl<'a, 'b> Backend<'a, 'b> {
         Ok(())
     }
 
+    pub fn generate_macro_call_order(&self, call_id: Id, mac_topo: &mut Vec<Id>) {
+        let macro_name = match self.semantic.parser.nodes[call_id] {
+            Node::MacroCall { name, .. } => name,
+            _ => unreachable!(),
+        };
+        let resolved_macro = self.semantic.resolve(macro_name).unwrap();
+        let resolved_scope = self.semantic.parser.node_scopes[resolved_macro];
+
+        // let func = self.semantic.parser.function_by_macro_call[&resolved_scope];
+        let calls_before = self
+            .semantic
+            .parser
+            .macro_calls_by_function
+            .get(&resolved_scope);
+
+        if let Some(calls_before) = calls_before {
+            for &cb in calls_before {
+                self.generate_macro_call_order(cb, mac_topo);
+            }
+        }
+
+        if !mac_topo.contains(&call_id) {
+            mac_topo.push(call_id);
+        }
+    }
+
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
         // ugh clone...
-        for t in self.semantic.parser.macro_calls.clone() {
+        for t in self.semantic.parser.externs.clone() {
             self.semantic.assign_type(t)?;
-        }
-        for t in self.semantic.topo.clone() {
-            self.semantic.assign_type(t)?;
-        }
-        self.semantic.unify_types(true)?;
-
-        for t in self.semantic.topo.clone() {
             self.compile_id(t)?;
         }
+
+        let mut mac_topo = Vec::new();
         for t in self.semantic.parser.macro_calls.clone() {
+            self.generate_macro_call_order(t, &mut mac_topo);
+        }
+
+        for t in mac_topo {
+            self.semantic.assign_type(t)?;
+            for t in self.semantic.topo.clone() {
+                self.semantic.assign_type(t)?;
+            }
+            self.semantic.unify_types(true)?;
+            for t in self.semantic.topo.clone() {
+                self.compile_id(t)?;
+            }
+            self.semantic.topo.clear();
             self.compile_id(t)?;
         }
 
@@ -474,6 +508,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     _ => unreachable!(),
                 };
 
+                // todo(chad): if the macro is Tokens -> Tokens with no other params, we should NOT build this extra layer
                 let compiled_macro = self.build_hoisted_function(params, name)?;
                 let compiled_macro: fn(semantic: *mut Semantic) -> i64 =
                     unsafe { std::mem::transmute(compiled_macro) };
@@ -481,6 +516,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let tokens = self.semantic.parser.token_vecs[tokens_id as usize].clone();
 
                 self.semantic.parser.lexer.macro_tokens = Some(tokens);
+                self.semantic.parser.top_scope = self.semantic.parser.node_scopes[id];
                 self.semantic.parser.lexer.top = Lexeme::new(Token::EOF, Range::default());
                 self.semantic.parser.lexer.second = Lexeme::new(Token::EOF, Range::default());
                 self.semantic.parser.lexer.pop();
@@ -492,6 +528,10 @@ impl<'a, 'b> Backend<'a, 'b> {
                 // );
 
                 let parsed = self.semantic.parser.parse_fn_stmt()?;
+
+                self.semantic.allocate_for_new_nodes();
+                self.allocate_for_new_nodes();
+
                 self.semantic.assign_type(parsed)?;
 
                 self.semantic.parser.lexer.macro_tokens = None;
@@ -511,15 +551,21 @@ impl<'a, 'b> Backend<'a, 'b> {
         }
     }
 
+    pub fn allocate_for_new_nodes(&mut self) {
+        while self.values.len() < self.semantic.parser.nodes.len() {
+            self.values.push(Value::Unassigned);
+        }
+    }
+
     pub fn build_hoisted_function(
         &mut self,
         params: Vec<Id>,
         hoisting_name: Sym,
     ) -> Result<*const u8, CompileError> {
-        println!(
-            "compiling hoisting function for {}",
-            self.resolve_symbol(hoisting_name)
-        );
+        // println!(
+        //     "compiling hoisting function for {}",
+        //     self.resolve_symbol(hoisting_name)
+        // );
 
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
@@ -1727,9 +1773,10 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         // 64-bit length + ptr
         Type::Array(_) | Type::String => module.isa().pointer_bytes() as u32 + 8,
         _ => todo!(
-            "type_size for {:?} ({})",
+            "type_size for {:?} ({}) with node id {}",
             &semantic.types[id],
-            semantic.parser.debug(id)
+            semantic.parser.debug(id),
+            id,
         ),
     }
 }

@@ -546,8 +546,6 @@ impl<'a> Semantic<'a> {
                 params,
                 expanded,
             } => {
-                self.topo.push(id);
-
                 self.assign_type(name)?;
 
                 let given = self.parser.id_vec(params).clone();
@@ -570,8 +568,11 @@ impl<'a> Semantic<'a> {
                     self.match_types(*d, *g);
                 }
 
+                self.types[id] = Type::Type;
+
                 for stmt in self.parser.id_vec(expanded).clone() {
                     self.assign_type(stmt)?;
+                    self.types[id] = self.types[stmt];
                 }
 
                 Ok(())
@@ -1095,5 +1096,11 @@ impl<'a> Semantic<'a> {
                 self.parser.ranges[id],
             )
         })
+    }
+
+    pub fn allocate_for_new_nodes(&mut self) {
+        while self.types.len() < self.parser.nodes.len() {
+            self.types.push(Type::Unassigned);
+        }
     }
 }
