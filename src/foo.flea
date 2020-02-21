@@ -1,10 +1,47 @@
-extern print_int(i: i64) struct{};
-extern print_string(len: i64, ptr: *i8) struct{};
+// extern print_int(i: i64) struct{};
+// extern print_string(len: i64, ptr: *i8) struct{};
 
-fn print_str(s: *string) i64 {
-    print_string(s.len, s.buf);
-    return 0;
-}
+// fn print_str(s: *string) i64 {
+//     print_string(s.len, s.buf);
+//     return 0;
+// }
+
+// enum Token {
+//     LParen: struct{},
+//     RParen: struct{},
+//     LCurly: struct{},
+//     RCurly: struct{},
+//     LSquare: struct{},
+//     RSquare: struct{},
+//     Semicolon: struct{},
+//     Colon: struct{},
+//     Bang: struct{},
+//     Backslash: struct{},
+//     Dot: struct{},
+//     Asterisk: struct{},
+//     Eq: struct{},
+//     Comma: struct{},
+//     Struct: struct{},
+//     Enum: struct{},
+//     Fn: struct{},
+//     Extern: struct{},
+//     If: struct{},
+//     Else: struct{},
+//     True: struct{},
+//     False: struct{},
+//     I8: struct{},
+//     I16: struct{},
+//     I32: struct{},
+//     I64: struct{},
+//     Ampersand: struct{},
+//     Type_: struct{},
+//     Caret: struct{},
+//     Uninit: struct{},
+//     Symbol: string,
+//     IntegerLiteral: i64,
+//     FloatLiteral: f64,
+//     StringLiteral: string,
+// }
 
 // enum Ty {
 //     I8: struct{},
@@ -30,52 +67,33 @@ fn print_str(s: *string) i64 {
 //     Hack: []Ty,
 // }
 
-// enum Wtf {
-//     x: string,
-//     y: bool,
-// }
-
-macro bar(n: i64) i64 {
-    print_str(&"bar");
-    print_int(n);
-    return n;
-}
-
-macro foo(n: i64) i64 {
-    print_str(&"foo");
-    print_int(n);
-
-    bar(15);
-
-    return n;
+macro foo(t: Tokens) Tokens {
+    // print_str(&"foo");
+    return t;
 }
 
 fn main() i64 {
-    print_str(&"wooo");
-    foo(332);
-    return 0;
-
-    // let t: Ty = {
-    //     Struct: []{ I8: {} }
-    // };
-
-    // return 0;
+    // print_str(&"main");
+    foo!(let a = 3;);
+    return a;
 }
 
 // fn old_tests() i64 {
-//     return poly_call(id, 15);
-//     return poly_call(poly_id, 99);
-//     return poly_omg(poly_call, poly_id, 10);
-//     return test_poly1();
+//     // return poly_call(id, 15);
+//     // return poly_call(poly_id, 99);
+//     // return poly_omg(poly_call, poly_id, 10);
+//     // return test_poly1();
 
-//     return omg(call, id, 10);
-//     return call(id, 10);
+//     // return omg(call, id, 10);
+//     // return call(id, 10);
 
-//     return test_fn_ptr();
-//     return cpi_test();
-//     return baz();
-//     return bar();
-//     return test_load_param();
+//     // return test_fn_ptr();
+//     // return cpi_test();
+//     // return baz();
+//     // return bar();
+//     // return test_load_param();
+
+//     return 0;
 // }
 
 // struct Point {
@@ -107,7 +125,7 @@ fn main() i64 {
 //     value: **i64,
 // }
 
-// struct Poly!(T: Type) {
+// struct Poly<T: Type> {
 //     val: T,
 // }
 
@@ -139,7 +157,7 @@ fn main() i64 {
 //     return hack_p.y;
 // }
 
-// fn poly_get_y!(T: Type)(p: *T) i64 {
+// fn poly_get_y<T: Type>(p: *T) i64 {
 //     let hack_p = p;
 //     let p2 = ^hack_p;
 //     return p2.y;
@@ -149,7 +167,7 @@ fn main() i64 {
 //     return n;
 // }
 
-// fn poly_id!(P: Type)(x: P) P {
+// fn poly_id<P: Type>(x: P) P {
 //     return x;
 // }
 
@@ -157,7 +175,7 @@ fn main() i64 {
 //     return f(val);
 // }
 
-// fn poly_call!(T: Type, R: Type)(f: fn(n: T) R, val: T) R {
+// fn poly_call<T: Type, R: Type>(f: fn(n: T) R, val: T) R {
 //     return f(val);
 // }
 
@@ -167,7 +185,7 @@ fn main() i64 {
 //     return g(f, val);
 // }
 
-// fn poly_omg!(P: Type)(
+// fn poly_omg<P: Type>(
 //     g: fn(f1: fn(n1: P) P, val1: P) P, 
 //     f: fn(n: P) P, 
 //     val: P
@@ -211,8 +229,7 @@ fn main() i64 {
 // }
 
 // fn load_wrapper(n: **i64) i64 {
-//     let nn: **i64 = n;
-//     return ^^nn;
+//     return ^^n;
 // }
 
 // fn bar() i64 {

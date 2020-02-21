@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] redo macros the rust way, just accept and return a token stream
+- [ ] redo macros the rust way -- stream of tokens in, stream of tokens out
 - [ ] debugging
 - [ ] basic enum support
   - [x] set enum tag during enum literal construction

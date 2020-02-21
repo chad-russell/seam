@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, Lexeme, Node, Parser, Range, Token, Type};
 use crate::semantic::Semantic;
 
 use cranelift::codegen::ir::{FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind};
@@ -123,6 +123,23 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
+        // ugh clone...
+        for t in self.semantic.parser.macro_calls.clone() {
+            self.semantic.assign_type(t)?;
+        }
+        for t in self.semantic.topo.clone() {
+            self.semantic.assign_type(t)?;
+        }
+        self.semantic.unify_types(true)?;
+
+        for t in self.semantic.topo.clone() {
+            self.compile_id(t)?;
+        }
+        for t in self.semantic.parser.macro_calls.clone() {
+            self.compile_id(t)?;
+        }
+
+        // ugh clone...
         for tl in self.semantic.parser.top_level.clone() {
             let is_poly = match &self.semantic.parser.nodes[tl] {
                 Node::Func { ct_params, .. } => ct_params.is_some(),
@@ -255,6 +272,10 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 
     pub fn compile(&mut self) -> Result<(), CompileError> {
+        while self.values.len() < self.semantic.parser.nodes.len() {
+            self.values.push(Value::Unassigned);
+        }
+
         for tl in self.semantic.topo.clone() {
             self.compile_id(tl)?;
         }
@@ -282,8 +303,8 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let mut module: Module<SimpleJITBackend> = {
                     let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
                     jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-                    jit_builder.symbol("__macro_insert", macro_insert as *const u8);
-                    jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
+                    // jit_builder.symbol("__macro_insert", macro_insert as *const u8);
+                    // jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
                     jit_builder.symbol("print_int", print_int as *const u8);
                     jit_builder.symbol("print_string", print_string as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
@@ -438,17 +459,11 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 Ok(())
             }
-            Node::Call {
-                name,           // Id
-                params,         // IdVec
-                is_macro,       // bool
-                macro_stmts: _, // IdVec
-                ..
+            Node::MacroCall {
+                name,
+                params,
+                expanded: _,
             } => {
-                if !is_macro {
-                    unreachable!();
-                }
-
                 self.values[id] = Value::None;
 
                 self.compile_id(name)?;
@@ -460,9 +475,26 @@ impl<'a, 'b> Backend<'a, 'b> {
                 };
 
                 let compiled_macro = self.build_hoisted_function(params, name)?;
-                let compiled_macro: fn(semantic: *mut Semantic) =
+                let compiled_macro: fn(semantic: *mut Semantic) -> i64 =
                     unsafe { std::mem::transmute(compiled_macro) };
-                compiled_macro(self.semantic as *mut _);
+                let tokens_id = compiled_macro(self.semantic as *mut _);
+                let tokens = self.semantic.parser.token_vecs[tokens_id as usize].clone();
+
+                self.semantic.parser.lexer.macro_tokens = Some(tokens);
+                self.semantic.parser.lexer.top = Lexeme::new(Token::EOF, Range::default());
+                self.semantic.parser.lexer.second = Lexeme::new(Token::EOF, Range::default());
+                self.semantic.parser.lexer.pop();
+                self.semantic.parser.lexer.pop();
+
+                // println!(
+                //     "received tokens: {:?}",
+                //     self.semantic.parser.token_vecs[tokens_id as usize].clone()
+                // );
+
+                let parsed = self.semantic.parser.parse_fn_stmt()?;
+                self.semantic.assign_type(parsed)?;
+
+                self.semantic.parser.lexer.macro_tokens = None;
 
                 Ok(())
             }
@@ -519,6 +551,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         // param 0 = ptr to semantic
         // todo(chad): eventually param 1 = ptr to return value
         sig.params.push(AbiParam::new(module.isa().pointer_type()));
+        sig.returns.push(AbiParam::new(types::I64));
 
         ctx.func.signature = sig;
 
@@ -618,11 +651,10 @@ impl<'a, 'b> Backend<'a, 'b> {
             .module
             .declare_func_in_func(found_macro, &mut fb.builder.func);
 
-        let _call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
-        // let return_value = builder.func.dfg.inst_results(call_inst)[0];
-        // self.set_value(id, return_value);
+        let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
+        let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
 
-        fb.builder.ins().return_(&[]);
+        fb.builder.ins().return_(&[return_value]);
 
         fb.builder.seal_all_blocks();
         fb.builder.finalize();
@@ -1036,23 +1068,20 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
+            Node::MacroCall { expanded, .. } => {
+                for stmt in self.backend.semantic.parser.id_vec(expanded).clone() {
+                    self.compile_id(stmt)?;
+                }
+
+                Ok(())
+            }
             Node::Call {
-                name,        // Id
-                params,      // IdVec
-                is_macro,    // bool
-                macro_stmts, // IdVec
+                name,   // Id
+                params, // IdVec
                 ..
             } => {
-                if is_macro {
-                    for stmt in self.backend.semantic.parser.id_vec(macro_stmts).clone() {
-                        self.compile_id(stmt)?;
-                    }
-
-                    Ok(())
-                } else {
-                    let params = self.backend.semantic.parser.id_vec(params).clone();
-                    self.compile_call(id, name, &params)
-                }
+                let params = self.backend.semantic.parser.id_vec(params).clone();
+                self.compile_call(id, name, &params)
             }
             Node::If {
                 cond,
@@ -1396,12 +1425,24 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
-            Node::UnquotedCodeInsert(stmts) => {
-                for stmt in self.backend.semantic.parser.id_vec(stmts).clone() {
-                    self.compile_id(stmt)?;
-                    self.backend.values[id] = self.backend.values[stmt]; // todo(chad): @Lazy
-                    self.backend.semantic.parser.node_is_addressable[id] =
-                        self.backend.semantic.parser.node_is_addressable[stmt];
+            Node::Tokens(token_vec_id) => {
+                let value = self.builder.ins().iconst(types::I64, token_vec_id.0 as i64);
+
+                self.set_value(id, value);
+
+                if self.backend.semantic.parser.node_is_addressable[id] {
+                    let slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size: 8,
+                        offset: None,
+                    });
+                    let slot_addr =
+                        self.builder
+                            .ins()
+                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let value = Value::Value(slot_addr);
+                    self.store_value(id, &value, None);
+                    self.backend.values[id] = value;
                 }
 
                 Ok(())
@@ -1643,7 +1684,8 @@ pub fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, C
         Type::Func { .. } => Ok(types::I64),
         Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
         Type::Struct { params, .. } if semantic.parser.id_vec(*params).len() == 0 => unreachable!(),
-        Type::Code => Ok(types::I64), // just the node id
+        Type::Code => Ok(types::I64),   // just the node id
+        Type::Tokens => Ok(types::I64), // just the index into token_vecs
         _ => Err(CompileError::from_string(
             format!("Could not convert type {:?}", ty),
             range,
@@ -1662,6 +1704,7 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         Type::Basic(BasicType::F32) => 4,
         Type::Basic(BasicType::F64) => 8,
         Type::Code => 8,
+        Type::Tokens => 8,
         Type::Pointer(_) => module.isa().pointer_bytes() as _,
         Type::Func { .. } => module.isa().pointer_bytes() as _,
         Type::Struct { params, .. } => semantic
@@ -1742,79 +1785,79 @@ fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
 
-fn prepare_unquote(
-    semantic: *mut Semantic,
-    is_unquote_code: i64,
-    _unquote_id: Id, // todo(chad): remove this
-    address: *const u8,
-) {
-    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
-    let is_unquote_code = is_unquote_code == 1;
+// fn prepare_unquote(
+//     semantic: *mut Semantic,
+//     is_unquote_code: i64,
+//     _unquote_id: Id, // todo(chad): remove this
+//     address: *const u8,
+// ) {
+//     let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
+//     let is_unquote_code = is_unquote_code == 1;
 
-    let value = unsafe { *(address as *const i64) };
+//     let value = unsafe { *(address as *const i64) };
 
-    // println!(
-    //     "preparing unquote {}. Value (as i64) is {}",
-    //     semantic.parser.debug(unquote_id),
-    //     value
-    // );
+//     // println!(
+//     //     "preparing unquote {}. Value (as i64) is {}",
+//     //     semantic.parser.debug(unquote_id),
+//     //     value
+//     // );
 
-    if is_unquote_code {
-        let stmts = match semantic.parser.nodes[value as usize] {
-            Node::Code(stmts) => stmts,
-            _ => unreachable!(),
-        };
+//     if is_unquote_code {
+//         let stmts = match semantic.parser.nodes[value as usize] {
+//             Node::Code(stmts) => stmts,
+//             _ => unreachable!(),
+//         };
 
-        // for stmt in semantic.parser.id_vec(stmts).clone() {
-        //     println!("{}", semantic.parser.debug(stmt));
-        // }
+//         // for stmt in semantic.parser.id_vec(stmts).clone() {
+//         //     println!("{}", semantic.parser.debug(stmt));
+//         // }
 
-        // let scope = semantic.parser.node_scopes[unquote_id];
-        let expansion_site = semantic.macro_expansion_site.unwrap();
-        let scope = semantic.parser.node_scopes[expansion_site];
+//         // let scope = semantic.parser.node_scopes[unquote_id];
+//         let expansion_site = semantic.macro_expansion_site.unwrap();
+//         let scope = semantic.parser.node_scopes[expansion_site];
 
-        let mut inserted_stmts = Vec::new();
-        for stmt in semantic.parser.id_vec(stmts).clone() {
-            inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
-        }
+//         let mut inserted_stmts = Vec::new();
+//         for stmt in semantic.parser.id_vec(stmts).clone() {
+//             inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
+//         }
 
-        let inserted_stmts = semantic.parser.push_id_vec(inserted_stmts);
-        semantic
-            .unquote_values
-            .push(Node::UnquotedCodeInsert(inserted_stmts));
-    } else {
-        // todo(chad): @ConstValue
-        semantic.unquote_values.push(Node::IntLiteral(value));
-    }
-}
+//         let inserted_stmts = semantic.parser.push_id_vec(inserted_stmts);
+//         semantic
+//             .unquote_values
+//             .push(Node::UnquotedCodeInsert(inserted_stmts));
+//     } else {
+//         // todo(chad): @ConstValue
+//         semantic.unquote_values.push(Node::IntLiteral(value));
+//     }
+// }
 
-fn macro_insert(semantic: *mut Semantic, stmts: Id) {
-    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
-    let stmts = IdVec(stmts);
-    let expansion_site = semantic.macro_expansion_site.unwrap();
-    let scope = semantic.parser.node_scopes[expansion_site];
+// fn macro_insert(semantic: *mut Semantic, stmts: Id) {
+//     let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
+//     let stmts = IdVec(stmts);
+//     let expansion_site = semantic.macro_expansion_site.unwrap();
+//     let scope = semantic.parser.node_scopes[expansion_site];
 
-    // println!("****");
-    // println!(
-    //     "inserting stmts for current macro expansion context: {:?} {}",
-    //     stmts,
-    //     semantic.parser.debug(expansion_site)
-    // );
+//     // println!("****");
+//     // println!(
+//     //     "inserting stmts for current macro expansion context: {:?} {}",
+//     //     stmts,
+//     //     semantic.parser.debug(expansion_site)
+//     // );
 
-    let insertion_point = match semantic.parser.nodes[expansion_site] {
-        Node::Call { macro_stmts, .. } => macro_stmts,
-        _ => unreachable!(),
-    };
+//     let insertion_point = match semantic.parser.nodes[expansion_site] {
+//         Node::Call { macro_stmts, .. } => macro_stmts,
+//         _ => unreachable!(),
+//     };
 
-    let mut inserted_stmts = Vec::new();
-    for stmt in semantic.parser.id_vec(stmts).clone() {
-        // println!("inserting statement :: {}", semantic.parser.debug(stmt));
-        inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
-    }
+//     let mut inserted_stmts = Vec::new();
+//     for stmt in semantic.parser.id_vec(stmts).clone() {
+//         // println!("inserting statement :: {}", semantic.parser.debug(stmt));
+//         inserted_stmts.push(semantic.deep_copy_stmt(scope, stmt));
+//     }
 
-    let insertion_point = semantic.parser.id_vec_mut(insertion_point);
-    insertion_point.extend(inserted_stmts.iter());
-}
+//     let insertion_point = semantic.parser.id_vec_mut(insertion_point);
+//     insertion_point.extend(inserted_stmts.iter());
+// }
 
 fn print_int(n: i64) {
     println!("{}", n);

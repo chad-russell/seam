@@ -10,6 +10,9 @@ type Sym = usize;
 pub struct IdVec(pub Id);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenVec(pub Id);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
     pub line: usize,
     pub col: usize,
@@ -64,6 +67,7 @@ pub enum BasicType {
 pub enum Type {
     Unassigned,
     Basic(BasicType),
+    Tokens,
     Code,
     Pointer(Id),
     String,
@@ -120,15 +124,16 @@ impl Into<Type> for BasicType {
     }
 }
 
-// todo(chad): make this copy
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Token {
     LParen,
     RParen,
     LCurly,
     RCurly,
     LSquare,
     RSquare,
+    LAngle,
+    RAngle,
     Semicolon,
     Colon,
     Bang,
@@ -146,6 +151,7 @@ enum Token {
     HashCodeStmt,
     HashCodeExpr,
     Code,
+    Tokens,
     If,
     Else,
     True,
@@ -161,18 +167,18 @@ enum Token {
     Symbol(Sym),
     IntegerLiteral(i64), // TODO: handle negative literals
     FloatLiteral(f64),   // TODO: handle negative literals
-    StringLiteral(String),
+    StringLiteral(Sym),
     EOF,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct Lexeme {
-    tok: Token,
-    range: Range,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lexeme {
+    pub tok: Token,
+    pub range: Range,
 }
 
 impl Lexeme {
-    fn new(tok: Token, range: Range) -> Self {
+    pub fn new(tok: Token, range: Range) -> Self {
         Self { tok, range }
     }
 }
@@ -187,8 +193,10 @@ pub struct Lexer<'a> {
     pub original_source: &'a str,
     pub loc: Location,
 
-    top: Lexeme,
-    second: Lexeme,
+    pub macro_tokens: Option<Vec<Lexeme>>,
+
+    pub top: Lexeme,
+    pub second: Lexeme,
 }
 
 fn is_special(c: char) -> bool {
@@ -202,6 +210,8 @@ fn is_special(c: char) -> bool {
         || c == ')'
         || c == '['
         || c == ']'
+        || c == '<'
+        || c == '>'
         || c == '+'
         || c == '-'
         || c == '*'
@@ -229,6 +239,7 @@ impl<'a> Lexer<'a> {
             loc: Default::default(),
             top: Lexeme::new(Token::EOF, Default::default()),
             second: Lexeme::new(Token::EOF, Default::default()),
+            macro_tokens: None,
         }
     }
 
@@ -340,6 +351,22 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn pop(&mut self) {
+        if let Some(macro_tokens) = self.macro_tokens.as_mut() {
+            let macro_tokens: &mut Vec<Lexeme> = macro_tokens;
+
+            self.top = self.second;
+            self.second = macro_tokens
+                .first()
+                .cloned()
+                .unwrap_or(Lexeme::new(Token::EOF, Range::default()));
+
+            if !macro_tokens.is_empty() {
+                macro_tokens.remove(0);
+            }
+
+            return;
+        }
+
         self.eat_spaces();
 
         let start = self.loc;
@@ -399,6 +426,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("Code", Token::Code) {
             return;
         }
+        if self.prefix_keyword("Tokens", Token::Tokens) {
+            return;
+        }
         if self.prefix_keyword("i8", Token::I8) {
             return;
         }
@@ -445,6 +475,12 @@ impl<'a> Lexer<'a> {
         if self.prefix("]", Token::RSquare) {
             return;
         }
+        if self.prefix("<", Token::LAngle) {
+            return;
+        }
+        if self.prefix(">", Token::RAngle) {
+            return;
+        }
         if self.prefix(",", Token::Comma) {
             return;
         }
@@ -485,6 +521,7 @@ impl<'a> Lexer<'a> {
                 };
 
                 let s = String::from(&self.source[0..index]);
+                let s = self.string_interner.get_or_intern(s);
 
                 self.eat(index + 1);
                 Lexeme::new(Token::StringLiteral(s), Range::new(start, self.loc))
@@ -583,6 +620,7 @@ pub struct Parser<'a> {
     pub unquote_scope: Id,
 
     pub returns: Vec<Id>,
+    pub macro_calls: Vec<Id>,
     pub string_literals: Vec<Id>,
     pub string_literal_offset: usize,
 
@@ -590,8 +628,9 @@ pub struct Parser<'a> {
     pub current_unquote: IdVec,
     pub parsed_unquotes: Vec<Id>,
 
-    // todo(chad): is this worth flattening?
+    // todo(chad): are these worth flattening?
     pub id_vecs: Vec<Vec<Id>>,
+    pub token_vecs: Vec<Vec<Lexeme>>,
 
     pub copying: bool,
 
@@ -708,7 +747,6 @@ pub enum Node {
         unquotes: IdVec,
     },
     Code(IdVec),
-    UnquotedCodeInsert(IdVec), // todo(chad): combine this with the `Code` node? with a flag?
     DeclParam {
         name: Sym,
         ty: Id,
@@ -741,9 +779,13 @@ pub enum Node {
         name: Id,
         ct_params: Option<IdVec>,
         params: IdVec,
-        is_macro: bool,
-        macro_stmts: IdVec,
     },
+    MacroCall {
+        name: Id,
+        params: IdVec,
+        expanded: IdVec,
+    },
+    Tokens(TokenVec),
     ArrayAccess {
         arr: Id,
         index: Id,
@@ -822,7 +864,9 @@ impl<'a> Parser<'a> {
             calls: Default::default(),
             top_level_map: Default::default(),
             id_vecs: Default::default(),
+            token_vecs: Default::default(),
             returns: Default::default(),
+            macro_calls: Default::default(),
             string_literals: Default::default(),
             string_literal_offset: 0,
             current_unquote: IdVec(0),
@@ -944,6 +988,12 @@ impl<'a> Parser<'a> {
 
                 Ok(self.push_node(range, Node::TypeLiteral(Type::Code)))
             }
+            Token::Tokens => {
+                let range = self.lexer.top.range;
+                self.lexer.pop(); // `Tokens`
+
+                Ok(self.push_node(range, Node::TypeLiteral(Type::Tokens)))
+            }
             Token::Struct => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `struct`
@@ -1039,7 +1089,7 @@ impl<'a> Parser<'a> {
                     Ok(self.push_node(range, Node::TypeLiteral(BasicType::Bool.into())))
                 } else if sym == self.sym_string {
                     Ok(self.push_node(range, Node::TypeLiteral(Type::String)))
-                } else if self.lexer.top.tok == Token::Bang {
+                } else if self.lexer.top.tok == Token::LAngle {
                     // self.lexer.pop();
                     // self.expect(&Token::LParen);
                     // let ct_params = self.parse_value_params();
@@ -1138,11 +1188,18 @@ impl<'a> Parser<'a> {
     pub fn parse_expression(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok.clone() {
             Token::IntegerLiteral(_) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
-            Token::StringLiteral(s) => {
+            Token::StringLiteral(sym) => {
                 let range = self.lexer.top.range;
                 self.lexer.pop();
-                let bytes = s.bytes().len();
-                let sym = self.lexer.string_interner.get_or_intern(s);
+
+                let bytes = self
+                    .lexer
+                    .string_interner
+                    .resolve(sym)
+                    .unwrap()
+                    .bytes()
+                    .len();
+
                 let string_id = self.push_node(range, Node::StringLiteral { sym, bytes });
                 self.string_literal_offset += bytes;
                 self.string_literals.push(string_id);
@@ -1254,11 +1311,12 @@ impl<'a> Parser<'a> {
 
                 let mut value = self.parse_lvalue()?;
 
-                // dot / function call / array access?
+                // dot / function call / macro call / array access?
                 while self.lexer.top.tok == Token::Dot
                     || self.lexer.top.tok == Token::LParen
                     || self.lexer.top.tok == Token::LCurly
                     || self.lexer.top.tok == Token::LSquare
+                    || self.lexer.top.tok == Token::LAngle
                     || self.lexer.top.tok == Token::Bang
                 {
                     if self.lexer.top.tok == Token::Dot {
@@ -1282,14 +1340,13 @@ impl<'a> Parser<'a> {
 
                         // all field accesses represent addressable memory
                         self.node_is_addressable[value] = true;
-                    } else if self.lexer.top.tok == Token::Bang
+                    } else if self.lexer.top.tok == Token::LAngle
                         || self.lexer.top.tok == Token::LParen
                     {
-                        let ct_params = if self.lexer.top.tok == Token::Bang {
-                            self.lexer.pop();
-                            self.expect(&Token::LParen)?;
+                        let ct_params = if self.lexer.top.tok == Token::LAngle {
+                            self.lexer.pop(); // `<`
                             let params = self.parse_value_params(true)?;
-                            self.expect(&Token::RParen)?;
+                            self.expect(&Token::RAngle)?;
                             Some(params)
                         } else {
                             None
@@ -1299,15 +1356,12 @@ impl<'a> Parser<'a> {
                         let params = self.parse_value_params(false)?;
                         let range = self.expect_range(start, Token::RParen)?;
 
-                        let macro_stmts = self.push_id_vec(Vec::new());
                         value = self.push_node(
                             range,
                             Node::Call {
                                 name: value,
                                 ct_params,
                                 params,
-                                is_macro: false,
-                                macro_stmts,
                             },
                         );
 
@@ -1317,6 +1371,40 @@ impl<'a> Parser<'a> {
                         let index = self.parse_expression()?;
                         let range = self.expect_range(start, Token::RSquare)?;
                         value = self.push_node(range, Node::ArrayAccess { arr: value, index });
+                    } else if self.lexer.top.tok == Token::Bang {
+                        // macro invocation, expect an open paren followed by raw tokens, followed by a close paren
+                        // todo(chad): expand the scope of these delimiters to more than just parens
+                        let tokens_start = self.lexer.top.range.start;
+
+                        self.lexer.pop(); // `!`
+                        self.expect(&Token::LParen)?;
+
+                        let mut tokens = Vec::new();
+                        while self.lexer.top.tok != Token::RParen {
+                            tokens.push(self.lexer.top);
+                            self.lexer.pop();
+                        }
+                        let tokens = self.push_token_vec(tokens);
+
+                        let range = self.expect_range(start, Token::RParen)?;
+                        let tokens_range = Range::new(tokens_start, range.end);
+
+                        // todo(chad): accept more params in macro invocations
+                        let token_param = self.push_node(tokens_range, Node::Tokens(tokens));
+                        let params = self.push_id_vec(vec![token_param]);
+
+                        let expanded = self.push_id_vec(Vec::new());
+
+                        value = self.push_node(
+                            range,
+                            Node::MacroCall {
+                                name: value,
+                                params,
+                                expanded,
+                            },
+                        );
+
+                        self.macro_calls.push(value);
                     } else if self.lexer.top.tok == Token::LCurly {
                         todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
                     } else {
@@ -1539,7 +1627,10 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
 
         let mut index = 0;
-        while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
+        while self.lexer.top.tok != Token::RParen
+            && self.lexer.top.tok != Token::RCurly
+            && self.lexer.top.tok != Token::RAngle
+        {
             let input_start = self.lexer.top.range.start;
 
             let name = self.parse_symbol()?;
@@ -1580,6 +1671,11 @@ impl<'a> Parser<'a> {
         IdVec(self.id_vecs.len() - 1)
     }
 
+    pub fn push_token_vec(&mut self, token_vec: Vec<Lexeme>) -> TokenVec {
+        self.token_vecs.push(token_vec);
+        TokenVec(self.token_vecs.len() - 1)
+    }
+
     fn parse_value_param(&mut self, index: u16, is_ct: bool) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
@@ -1613,7 +1709,10 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
 
         let mut vp_index = 0;
-        while self.lexer.top.tok != Token::RParen && self.lexer.top.tok != Token::RCurly {
+        while self.lexer.top.tok != Token::RParen
+            && self.lexer.top.tok != Token::RCurly
+            && self.lexer.top.tok != Token::RAngle
+        {
             params.push(self.parse_value_param(vp_index, is_ct)?);
             vp_index += 1;
 
@@ -1643,11 +1742,10 @@ impl<'a> Parser<'a> {
         let pushed_scope = self.push_scope();
         self.returns.clear();
 
-        let ct_params = if self.lexer.top.tok == Token::Bang {
-            self.lexer.pop();
-            self.expect(&Token::LParen)?;
+        let ct_params = if self.lexer.top.tok == Token::LAngle {
+            self.lexer.pop(); // `<`
             let ct_params = self.parse_params(true)?;
-            self.expect(&Token::RParen)?;
+            self.expect(&Token::RAngle)?;
             Some(ct_params)
         } else {
             None
@@ -1767,11 +1865,10 @@ impl<'a> Parser<'a> {
         self.lexer.pop();
         let name = self.parse_sym()?;
 
-        let ct_params = if self.lexer.top.tok == Token::Bang {
-            self.lexer.pop();
-            self.expect(&Token::LParen)?;
+        let ct_params = if self.lexer.top.tok == Token::LAngle {
+            self.lexer.pop(); // `<`
             let params = self.parse_params(true)?;
-            self.expect(&Token::RParen)?;
+            self.expect(&Token::RAngle)?;
             Some(params)
         } else {
             None

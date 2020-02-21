@@ -12,7 +12,6 @@ pub struct Semantic<'a> {
     pub type_matches: Vec<Vec<Id>>,
     pub macro_phase: bool,
     pub macro_expansion_site: Option<Id>, // todo(chad): make this just Id once we're confident it's always set
-    pub macro_calls: Vec<Id>,
     pub unquote_values: Vec<Node>,        // todo(chad): @ConstValue
 }
 
@@ -27,7 +26,6 @@ impl<'a> Semantic<'a> {
             type_matches: Vec::new(),
             macro_phase: false,
             macro_expansion_site: None,
-            macro_calls: Vec::new(),
             unquote_values: Vec::new(),
         }
     }
@@ -458,19 +456,6 @@ impl<'a> Semantic<'a> {
                 self.match_types(id, ret_id);
                 Ok(())
             }
-            // Node::If { cond_id, true_id, false_id } => {
-            //     self.assign_type(*cond_id, Coercion::Basic(BasicType::Bool))?;
-            //     self.assign_type(*true_id)?;
-
-            //     if false_id.is_some() {
-            //         self.assign_type(false_id.unwrap(), Coercion::Id(*true_id))?;
-            //     }
-
-            //     // todo(chad): enforce unit type for single-armed if stmts
-            //     self.match_types(id, *true_id);
-
-            //     Ok(())
-            // }
             // Node::While(cond, stmts) => {
             //     self.assign_type(*cond, Coercion::Basic(BasicType::Bool))?;
             //     for &stmt in stmts {
@@ -548,10 +533,45 @@ impl<'a> Semantic<'a> {
                         self.assign_type(array_ty)?;
                         self.types[id] = ty.clone();
                     }
-                    Type::Code => {
+                    Type::Code | Type::Tokens => {
                         self.types[id] = ty.clone();
                     }
                     Type::Unassigned => unreachable!(),
+                }
+
+                Ok(())
+            }
+            Node::MacroCall {
+                name,
+                params,
+                expanded,
+            } => {
+                self.topo.push(id);
+
+                self.assign_type(name)?;
+
+                let given = self.parser.id_vec(params).clone();
+                let decl = match &self.parser.nodes[name] {
+                    Node::Func { params, .. } => params,
+                    Node::Extern { params, .. } => params,
+                    _ => match &self.types[name] {
+                        Type::Func { input_tys, .. } => input_tys,
+                        _ => {
+                            dbg!(&self.types[name]);
+                            unreachable!();
+                        }
+                    },
+                };
+                let decl = self.parser.id_vec(*decl).clone();
+
+                for (g, d) in given.iter().zip(decl.iter()) {
+                    self.assign_type(*d)?;
+                    self.assign_type(*g)?;
+                    self.match_types(*d, *g);
+                }
+
+                for stmt in self.parser.id_vec(expanded).clone() {
+                    self.assign_type(stmt)?;
                 }
 
                 Ok(())
@@ -560,40 +580,19 @@ impl<'a> Semantic<'a> {
                 name,
                 ct_params,
                 params,
-                macro_stmts,
-                ..
             } => {
                 let resolved_func = self.resolve(name)?;
 
-                let is_macro_call = match self.parser.nodes.get_mut(resolved_func).unwrap() {
-                    Node::Func { is_macro, .. } => *is_macro,
-                    _ => false,
-                };
-                if is_macro_call {
-                    match self.parser.nodes.get_mut(id).unwrap() {
-                        Node::Call { is_macro, .. } => *is_macro = true,
-                        _ => unreachable!(),
-                    };
-                }
-
-                if is_macro_call {
-                    self.topo.push(id);
-                    self.macro_calls.push(id);
-                }
-
-                for stmt in self.parser.id_vec(macro_stmts).clone() {
-                    self.assign_type(stmt)?;
-                }
-
                 let is_ct = match &self.parser.nodes[resolved_func] {
                     Node::Func { ct_params, .. } => ct_params.is_some(),
+                    Node::Extern { .. } => false,
                     _ => match &self.types[resolved_func] {
                         // if it's a pure function type (already specialized) then it's not ct
                         Type::Func { .. } => false,
                         // otherwise what the heck are we trying to call?
                         _ => {
                             return Err(CompileError::from_string(
-                                &format!("Cannot call a non-func: {:?}", &self.types[resolved_func]),
+                                &format!("Cannot call a non-func: {:?}", &self.parser.nodes[resolved_func]),
                                 self.parser.ranges[id],
                             ))
                         }
@@ -649,6 +648,7 @@ impl<'a> Semantic<'a> {
                 let given = self.parser.id_vec(params).clone();
                 let decl = match &self.parser.nodes[resolved_func] {
                     Node::Func { params, .. } => params,
+                    Node::Extern { params, .. } => params,
                     _ => match &self.types[resolved_func] {
                         Type::Func { input_tys, .. } => input_tys,
                         _ => unreachable!(),
@@ -664,13 +664,6 @@ impl<'a> Semantic<'a> {
 
                 self.assign_type(name)?;
                 match self.types[name] {
-                    Type::Func { return_ty, .. } => {
-                        self.match_types(id, return_ty);
-                    }
-                    _ => (),
-                }
-
-                match self.types[name].clone() {
                     Type::Func { return_ty, .. } => self.match_types(id, return_ty),
                     _ => (),
                 }
@@ -735,6 +728,11 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
+            Node::Tokens(_) => {
+                self.types[id] = Type::Tokens;
+
+                Ok(())
+            }
             Node::Code(stmts) => {
                 self.types[id] = Type::Code;
 
@@ -746,18 +744,18 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::UnquotedCodeInsert(stmts) => {
-                for stmt in self.parser.id_vec(stmts).clone() {
-                    self.assign_type(stmt)?;
-                }
+            // Node::UnquotedCodeInsert(stmts) => {
+            //     for stmt in self.parser.id_vec(stmts).clone() {
+            //         self.assign_type(stmt)?;
+            //     }
 
-                // todo(chad): dangerous?
-                if let Some(&stmt) = self.parser.id_vec(stmts).first() {
-                    self.match_types(id, stmt);
-                }
+            //     // todo(chad): dangerous?
+            //     if let Some(&stmt) = self.parser.id_vec(stmts).first() {
+            //         self.match_types(id, stmt);
+            //     }
 
-                Ok(())
-            }
+            //     Ok(())
+            // }
             // _ => Err(CompileError::from_string(
             //     format!(
             //         "Cannot coerce type for AST node {:?}",
