@@ -139,7 +139,9 @@ impl<'a, 'b> Backend<'a, 'b> {
 
         if let Some(calls_before) = calls_before {
             for &cb in calls_before {
-                self.generate_macro_call_order(cb, mac_topo);
+                if cb != call_id {
+                    self.generate_macro_call_order(cb, mac_topo);
+                }
             }
         }
 
@@ -527,7 +529,9 @@ impl<'a, 'b> Backend<'a, 'b> {
                 //     self.semantic.parser.token_vecs[tokens_id as usize].clone()
                 // );
 
-                let parsed = self.semantic.parser.parse_fn_stmt()?;
+                // todo(chad): infer what to parse by where the macro is being instantiated (fn stmt, top level, expression, etc.)
+                // let parsed = self.semantic.parser.parse_fn_stmt()?;
+                let parsed = self.semantic.parser.parse_top_level()?;
 
                 self.semantic.allocate_for_new_nodes();
                 self.allocate_for_new_nodes();

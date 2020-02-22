@@ -1,10 +1,18 @@
-extern print_int(i: i64) struct{};
-extern print_string(len: i64, ptr: *i8) struct{};
+extern print_string(len: i64, ptr: *i8) i64;
 
 fn print_str(s: *string) i64 {
     print_string(s.len, s.buf);
     return 0;
 }
+
+// macro mac_id(t: Tokens) Tokens {
+//     print_str(&"hello");
+//     return t;
+// }
+
+// mac_id! {
+//     extern print_int(i: i64) i64;
+// }
 
 // enum Token {
 //     LParen: struct{},
@@ -43,49 +51,52 @@ fn print_str(s: *string) i64 {
 //     StringLiteral: string,
 // }
 
-// enum Ty {
-//     I8: struct{},
-//     I32: struct{},
-//     I64: struct{},
-//     F32: struct{},
-//     F64: struct{},
-//     String: struct{},
-//     Pointer: *Ty,
-//     Array: *Ty,
-//     Struct: []struct {
-//         name: string,
-//         type: Ty,
-//     },
-//     Enum: []struct {
-//         name: string,
-//         type: Ty,
-//     },
-//     Func: struct {
-//         input_types: []Ty,
-//         return_type: *Ty,
-//     },
-//     Hack: []Ty,
-// }
-
-bar!(let a = 3;);
-
-macro bar(t: Tokens) Tokens {
-    print_str(&"bar");
-    return t;
-}
-
-macro foo(t: Tokens) Tokens {
-    print_str(&"foo");
-    bar!(let c = 9;);
-    print_int(c);
-    return t;
+enum Ty {
+    I8: struct{},
+    I32: struct{},
+    I64: struct{},
+    F32: struct{},
+    F64: struct{},
+    String: struct{},
+    Pointer: *Ty,
+    Array: *Ty,
+    Struct: []struct {
+        name: string,
+        type: Ty,
+    },
+    Enum: []struct {
+        name: string,
+        type: Ty,
+    },
+    Func: struct {
+        input_types: []Ty,
+        return_type: *Ty,
+    },
+    Hack: []Ty,
 }
 
 fn main() i64 {
-    print_str(&"main");
-    foo!(let a = 3;);
-    foo!(let b = 12;);
-    return b;
+    // let a: i64 = 12;
+    // let b: i32 = 12;
+    // a = b;
+    // return a;
+
+    let t: Ty = {
+        Struct: []{
+            {
+                name: "foo",
+                type: { I64: {} }
+            },
+            {
+                name: "bar",
+                type: { I32: {} }
+            }
+        }
+    };
+
+    print_str(&t.Struct[1].name);
+
+    return 0;
 }
 
 // fn old_tests() i64 {

@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] redo macros the rust way -- stream of tokens in, stream of tokens out
+- [ ] type_of
 - [ ] debugging
 - [ ] basic enum support
   - [x] set enum tag during enum literal construction
@@ -15,14 +15,9 @@
   - [ ] baking
   - [x] non-type (constant value) params
   - [x] check conflicts during unification
-- [ ] first-class types
-  - [ ] in generics we should be able to do compile-time logic on the `T` type that doesn't make it into the final executable
-    - [ ] should be able to pass into a function that runs at compile-time only for example
-  - [ ] same with anything that comes as the result of `type_of`
 - [ ] defer
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] math (binary operations)
-- [ ] single function call as a statement (i.e. `foo();` should be a valid function statement)
 - [ ] if
   - [x] basic if/else statement functionality
   - [ ] as value expression

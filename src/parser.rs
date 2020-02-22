@@ -100,8 +100,6 @@ impl Type {
     pub fn is_concrete(&self) -> bool {
         match self {
             Type::Type | Type::Unassigned | Type::Basic(BasicType::IntLiteral) => false,
-            // todo(chad): do we need to keep separate track of funcs that are specialized vs not?
-            // Type::Func { .. } => false,
             _ => true,
         }
     }
@@ -1380,20 +1378,20 @@ impl<'a> Parser<'a> {
                         value = self.push_node(range, Node::ArrayAccess { arr: value, index });
                     } else if self.lexer.top.tok == Token::Bang {
                         // macro invocation, expect an open paren followed by raw tokens, followed by a close paren
-                        // todo(chad): expand the scope of these delimiters to more than just parens
+                        // todo(chad): expand the scope of these delimiters to more than just curlys
                         let tokens_start = self.lexer.top.range.start;
 
                         self.lexer.pop(); // `!`
-                        self.expect(&Token::LParen)?;
+                        self.expect(&Token::LCurly)?;
 
                         let mut tokens = Vec::new();
-                        while self.lexer.top.tok != Token::RParen {
+                        while self.lexer.top.tok != Token::RCurly {
                             tokens.push(self.lexer.top);
                             self.lexer.pop();
                         }
                         let tokens = self.push_token_vec(tokens);
 
-                        let range = self.expect_range(start, Token::RParen)?;
+                        let range = self.expect_range(start, Token::RCurly)?;
                         let tokens_range = Range::new(tokens_start, range.end);
 
                         // todo(chad): accept more params in macro invocations
@@ -1872,10 +1870,11 @@ impl<'a> Parser<'a> {
                 Ok(ext_id)
             }
             Token::Fn | Token::Macro => self.parse_fn(start),
-            _ => Err(CompileError::from_string(
-                "Unexpected top level",
-                self.lexer.top.range,
-            )),
+            _ => self.parse_expression(),
+            // _ => Err(CompileError::from_string(
+            //     "Unexpected top level",
+            //     self.lexer.top.range,
+            // )),
         }
     }
 

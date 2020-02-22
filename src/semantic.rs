@@ -915,6 +915,12 @@ impl<'a> Semantic<'a> {
         }
     }
 
+    fn check_int_literal_type(&mut self, bt: BasicType) {
+        if bt == BasicType::None || bt == BasicType::Bool {
+            todo!("non-matching int literal type");
+        }
+    }
+
     fn match_types(&mut self, ty1: Id, ty2: Id) {
         if ty1 == ty2 {
             return;
@@ -956,6 +962,14 @@ impl<'a> Semantic<'a> {
                     self.match_types(*ty1, *ty2);
                 }
             }
+            (Type::Enum { params: et1, .. }, Type::Enum { params: et2, .. }) => {
+                let et1 = self.parser.id_vec(et1).clone();
+                let et2 = self.parser.id_vec(et2).clone();
+
+                for (ty1, ty2) in et1.iter().zip(et2.iter()) {
+                    self.match_types(*ty1, *ty2);
+                }
+            }
             (Type::Struct { params: st, .. }, Type::Enum { params: et, .. }) => {
                 self.match_struct_to_enum(st, et);
             }
@@ -965,8 +979,20 @@ impl<'a> Semantic<'a> {
             (Type::Pointer(pt1), Type::Pointer(pt2)) => {
                 self.match_types(pt1, pt2);
             }
-            (_, _) => (),
-        }
+            (Type::Array(at1), Type::Array(at2)) => {
+                self.match_types(at1, at2);
+            }
+            (Type::Tokens, Type::Tokens) => (),
+            (Type::String, Type::String) => (),
+            (Type::Basic(bt1), Type::Basic(bt2)) if bt1 == bt2 => (),
+            (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => self.check_int_literal_type(bt),
+            (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => self.check_int_literal_type(bt),
+            (Type::Type, _) => (),
+            (_, Type::Type) => (),
+            (Type::Unassigned, _) => (),
+            (_, Type::Unassigned) => (),
+            (_, _) => todo!("type mismatch: {:?} vs {:?}", self.types[ty1], self.types[ty2]),
+        } 
 
         let id1 = self.find_type_array_index(ty1);
         let id2 = self.find_type_array_index(ty2);
@@ -988,6 +1014,7 @@ impl<'a> Semantic<'a> {
         }
     }
 
+    // todo(chad): only should match enum to struct if it's a struct literal -- NOT a real struct
     fn match_struct_to_enum(&mut self, st: IdVec, et: IdVec) {
         let struct_params = self.get_struct_params(st);
         let enum_params = self.get_struct_params(et);
@@ -1014,67 +1041,39 @@ impl<'a> Semantic<'a> {
         let mut to_clear = Vec::new();
 
         for uid in 0..self.type_matches.len() {
-            // println!("\n********* Unifying *********");
+            println!("\n********* Unifying *********");
+
             let tys = self.type_matches[uid]
                 .iter()
                 .map(|&ty| {
-                    // println!(
-                    //     "{:?} ({}) : {:?}",
-                    //     // &self.parser.nodes[ty],
-                    //     ty,
-                    //     self.parser.debug(ty),
-                    //     &self.types[ty],
-                    // );
+                    println!(
+                        "{:?} ({}) : {:?}",
+                        ty,
+                        self.parser.debug(ty),
+                        &self.types[ty],
+                    );
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
                 .filter(|(ty, _)| {
-                    if final_pass {
-                        self.types[*ty as usize].is_concrete()
-                    } else {
-                        self.types[*ty as usize].is_coercble()
-                    }
+                    self.types[*ty as usize].is_concrete()
                 })
                 .map(|(ty, _)| ty)
                 .collect::<Vec<_>>();
 
             // set all types to whatever we unified to
-            if let Some(&ty) = tys.last() {
-                match self.types[ty as usize].clone() {
-                    Type::Basic(BasicType::IntLiteral) => {
-                        self.types[ty as usize] = Type::Basic(BasicType::I64);
-                    }
-                    _ => (),
-                }
-                // println!(
-                //     "setting all to {:?} (from {:?})",
-                //     self.types[ty as usize],
-                //     self.parser.debug(ty as _)
-                // );
+            if let Some(&ty) = tys.first() {
+                println!(
+                    "setting all to {:?} (from {:?})",
+                    self.types[ty as usize],
+                    self.parser.debug(ty as _)
+                );
 
                 for id in self.type_matches[uid].iter() {
                     self.types[*id] = self.types[ty as usize].clone();
                 }
 
                 to_clear.push(uid);
-            }
-
-            for &ty in tys.iter() {
-                let check_err = match (self.types[ty], self.types[tys[0]]) {
-                    (Type::Basic(_), _) => true,
-                    (_, Type::Basic(_)) => true,
-                    _ => false,
-                };
-
-                if check_err && self.types[ty] != self.types[tys[0]] {
-                    return Err(CompileError::from_string(
-                        format!(
-                            "Type unification failed for types {:?} and {:?}",
-                            &self.types[ty], &self.types[tys[0]]
-                        ),
-                        self.parser.ranges[ty],
-                    ));
-                }
             }
         }
 
