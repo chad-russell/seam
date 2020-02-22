@@ -252,7 +252,8 @@ impl<'a> Semantic<'a> {
                     CompileError::from_string(
                         format!(
                             "Expected struct or enum, got {:?} for node {}",
-                            self.parser.debug(unpointered_ty),
+                            // self.parser.debug(unpointered_ty),
+                            self.types[unpointered_ty],
                             unpointered_ty,
                         ),
                         self.parser.ranges[base],
@@ -681,17 +682,33 @@ impl<'a> Semantic<'a> {
                 // for recursion purposes, give the struct a placeholder type before anything else
                 self.types[id] = Type::Type;
 
-                let (ct_params, params, copied) = if ct_params.is_some() {
+                let (ct_params, params) = if ct_params.is_some() {
                     let copied = self.deep_copy_struct(id);
 
-                    match &self.parser.nodes[id] {
+                    let copied_params = match self.parser.nodes[copied] {
+                        Node::Struct { params, .. } => params,
+                        _ => unreachable!()
+                    };
+
+                    self.types[copied] = Type::Struct {
+                        params: copied_params,
+                        copied_from: None,
+                    };
+                    self.match_types(id, copied)?;
+
+                    match &self.parser.nodes[copied] {
                         Node::Struct {
                             ct_params, params, ..
-                        } => (*ct_params, *params, Some(copied)),
+                        } => (*ct_params, *params),
                         _ => unreachable!(),
                     }
                 } else {
-                    (ct_params, params, None)
+                    self.types[id] = Type::Struct {
+                        params: params,
+                        copied_from: None,
+                    };
+
+                    (ct_params, params)
                 };
 
                 if let Some(ct_params) = ct_params {
@@ -702,10 +719,6 @@ impl<'a> Semantic<'a> {
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
                 }
-                self.types[id] = Type::Struct {
-                    params: params.clone(),
-                    copied_from: copied,
-                };
 
                 Ok(())
             }
@@ -1073,6 +1086,13 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn unify_types(&mut self) -> Result<(), CompileError> {
+        // as long as we're clearing stuff out, keep going
+        while self.unify_types_internal()? {}
+
+        Ok(())
+    }
+
+    pub fn unify_types_internal(&mut self) -> Result<bool, CompileError> {
         let mut to_clear = Vec::new();
 
         let mut future_matches = Vec::new();
@@ -1135,6 +1155,8 @@ impl<'a> Semantic<'a> {
             }
         }
 
+        let made_progress = !to_clear.is_empty();
+
         to_clear.reverse();
         for uid in to_clear {
             self.type_matches.remove(uid);
@@ -1147,7 +1169,7 @@ impl<'a> Semantic<'a> {
             self.match_struct_to_enum(lit_params, params)?;
         }
 
-        Ok(())
+        Ok(made_progress)
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {
