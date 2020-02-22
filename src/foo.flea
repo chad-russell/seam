@@ -72,7 +72,6 @@ enum Ty {
         input_types: []Ty,
         return_type: *Ty,
     },
-    Hack: []Ty,
 }
 
 fn main() i64 {
@@ -89,12 +88,23 @@ fn main() i64 {
             },
             {
                 name: "bar",
-                type: { I32: {} }
+                type: {
+                    Struct: []{
+                        {
+                            name: "e0",
+                            type: { I64: {} }
+                        },
+                        {
+                            name: "e1",
+                            type: { I64: {} }
+                        }
+                    } 
+                }
             }
         }
     };
 
-    print_str(&t.Struct[1].name);
+    print_str(&t.Struct[1].type.Struct[1].name);
 
     return 0;
 }

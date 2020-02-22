@@ -72,7 +72,7 @@ impl<'a> Semantic<'a> {
     //             backend.semantic.match_types(*g, *d);
     //         }
 
-    //         backend.semantic.unify_types(true)?;
+    //         backend.semantic.unify_types()?;
 
     //         let maybe_hoisted: *const u8 = if !given.is_empty() {
     //             // todo(chad): build constant 'includes', i.e. what else has to be pulled into the hoisted fn to support the const param
@@ -124,7 +124,7 @@ impl<'a> Semantic<'a> {
             Node::Symbol(sym) => {
                 let resolved = self.scope_get(sym, id)?;
                 self.assign_type(resolved)?;
-                self.match_types(id, resolved);
+                self.match_types(id, resolved)?;
                 self.parser.node_is_addressable[id] = self.parser.node_is_addressable[resolved];
                 Ok(())
             }
@@ -147,16 +147,16 @@ impl<'a> Semantic<'a> {
             Node::Let { name: _, ty, expr } => {
                 if let Some(expr) = expr {
                     self.assign_type(expr)?;
-                    self.match_types(id, expr);
+                    self.match_types(id, expr)?;
                 }
 
                 if let Some(ty) = ty {
                     self.assign_type(ty)?;
 
                     if let Some(poly_copy) = self.get_poly_copy(ty) {
-                        self.match_types(id, poly_copy);
+                        self.match_types(id, poly_copy)?;
                     } else {
-                        self.match_types(id, ty);
+                        self.match_types(id, ty)?;
                     }
                 }
 
@@ -170,8 +170,8 @@ impl<'a> Semantic<'a> {
 
                 self.assign_type(expr)?;
 
-                self.match_types(id, expr);
-                self.match_types(name, expr);
+                self.match_types(id, expr)?;
+                self.match_types(name, expr)?;
 
                 // if name is a load, then we are doing a store
                 let is_load = match &self.parser.nodes[name] {
@@ -268,11 +268,14 @@ impl<'a> Semantic<'a> {
                             _ => unreachable!(),
                         }
 
-                        self.match_types(id, *ty);
+                        self.match_types(id, *ty)?;
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
-                        "field not found",
+                        format!("field '{}' not found: fields are {:?}", 
+                            self.parser.lexer.string_interner.resolve(field_name).unwrap(),
+                            params.iter().map(|(sym, _)| self.parser.lexer.string_interner.resolve(*sym).unwrap()).collect::<Vec<_>>(),
+                        ),
                         self.parser.ranges[id],
                     )),
                 }
@@ -291,7 +294,7 @@ impl<'a> Semantic<'a> {
                     },
                     _ => Err(CompileError::from_string(format!("Cannot perform array access on non-array type {:?}", &self.types[id]), self.parser.ranges[id]))
                 }?;
-                self.match_types(id, array_ty);
+                self.match_types(id, array_ty)?;
 
                 // todo(chad): assert that `index` has i64 type
                 self.types[index] = Type::Basic(BasicType::I64);
@@ -306,10 +309,7 @@ impl<'a> Semantic<'a> {
                     self.assign_type(param)?;
                 }
 
-                self.types[id] = Type::Struct {
-                    params: params.clone(),
-                    copied_from: None,
-                };
+                self.types[id] = Type::StructLiteral(params);
 
                 Ok(())
             }
@@ -325,7 +325,9 @@ impl<'a> Semantic<'a> {
                     .ok_or_else(|| CompileError::from_string("Cannot have a zero-element array literal", self.parser.ranges[id]))?;
                 for &param in params.iter() {
                     self.assign_type(param)?;
-                    self.match_types(param, matcher);
+                    if param != matcher {
+                        self.match_types(param, matcher)?;
+                    }
                 }
 
                 self.types[id] = Type::Array(matcher);
@@ -395,7 +397,7 @@ impl<'a> Semantic<'a> {
 
                 for stmt in self.parser.id_vec(stmts).clone() {
                     self.assign_type(stmt)?;
-                    self.unify_types(false)?;
+                    self.unify_types()?;
                 }
 
                 for ret_id in self.parser.id_vec(returns).clone() {
@@ -404,7 +406,7 @@ impl<'a> Semantic<'a> {
                         _ => unreachable!(),
                     };
 
-                    self.match_types(return_ty, ret_id);
+                    self.match_types(return_ty, ret_id)?;
                 }
 
                 self.topo.push(id);
@@ -440,20 +442,20 @@ impl<'a> Semantic<'a> {
 
                 if let Some(ct_link) = ct_link {
                     self.assign_type(ct_link)?;
-                    self.match_types(id, ct_link);
+                    self.match_types(id, ct_link)?;
                 }
 
-                self.match_types(id, ty);
+                self.match_types(id, ty)?;
                 Ok(())
             }
             Node::ValueParam { name: _, value, .. } => {
                 self.assign_type(value)?;
-                self.match_types(id, value);
+                self.match_types(id, value)?;
                 Ok(())
             }
             Node::Return(ret_id) => {
                 self.assign_type(ret_id)?;
-                self.match_types(id, ret_id);
+                self.match_types(id, ret_id)?;
                 Ok(())
             }
             // Node::While(cond, stmts) => {
@@ -477,7 +479,7 @@ impl<'a> Semantic<'a> {
 
                 match self.types[load_id] {
                     Type::Pointer(pid) => {
-                        self.match_types(id, pid);
+                        self.match_types(id, pid)?;
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
@@ -519,7 +521,12 @@ impl<'a> Semantic<'a> {
                         for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty)?;
                         }
-
+                        self.types[id] = ty.clone();
+                    }
+                    Type::StructLiteral(params) => {
+                        for ty in self.parser.id_vec(params).clone() {
+                            self.assign_type(ty)?;
+                        }
                         self.types[id] = ty.clone();
                     }
                     Type::Enum { params, .. } => {
@@ -554,10 +561,7 @@ impl<'a> Semantic<'a> {
                     Node::Extern { params, .. } => params,
                     _ => match &self.types[name] {
                         Type::Func { input_tys, .. } => input_tys,
-                        _ => {
-                            dbg!(&self.types[name]);
-                            unreachable!();
-                        }
+                        _ => unreachable!()
                     },
                 };
                 let decl = self.parser.id_vec(*decl).clone();
@@ -565,7 +569,7 @@ impl<'a> Semantic<'a> {
                 for (g, d) in given.iter().zip(decl.iter()) {
                     self.assign_type(*d)?;
                     self.assign_type(*g)?;
-                    self.match_types(*d, *g);
+                    self.match_types(*d, *g)?;
                 }
 
                 self.types[id] = Type::Type;
@@ -632,7 +636,7 @@ impl<'a> Semantic<'a> {
                     for (index, (g, d)) in given.iter().zip(decl.iter()).enumerate() {
                         self.assign_type(*d)?;
                         self.assign_type(*g)?;
-                        self.match_types(*g, *d);
+                        self.match_types(*g, *d)?;
 
                         match self.types[*d] {
                             Type::Type => (),
@@ -660,12 +664,12 @@ impl<'a> Semantic<'a> {
                 for (g, d) in given.iter().zip(decl.iter()) {
                     self.assign_type(*d)?;
                     self.assign_type(*g)?;
-                    self.match_types(*d, *g);
+                    self.match_types(*d, *g)?;
                 }
 
                 self.assign_type(name)?;
                 match self.types[name] {
-                    Type::Func { return_ty, .. } => self.match_types(id, return_ty),
+                    Type::Func { return_ty, .. } => self.match_types(id, return_ty)?,
                     _ => (),
                 }
 
@@ -718,7 +722,7 @@ impl<'a> Semantic<'a> {
             // Node::Code
             Node::Unquote(unq) => {
                 self.assign_type(unq)?;
-                self.match_types(id, unq);
+                self.match_types(id, unq)?;
 
                 Ok(())
             }
@@ -850,6 +854,7 @@ impl<'a> Semantic<'a> {
         copied
     }
 
+    #[allow(dead_code)]
     pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
         // println!("copying stmt!");
 
@@ -921,9 +926,9 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    fn match_types(&mut self, ty1: Id, ty2: Id) {
+    fn match_types(&mut self, ty1: Id, ty2: Id) -> Result<(), CompileError> {
         if ty1 == ty2 {
-            return;
+            return Ok(());
         }
 
         if self.types[ty1] == Type::Unassigned {
@@ -949,9 +954,9 @@ impl<'a> Semantic<'a> {
                 let input_tys1 = self.parser.id_vec(input_tys1).clone();
                 let input_tys2 = self.parser.id_vec(input_tys2).clone();
 
-                self.match_types(return_ty1, return_ty2);
+                self.match_types(return_ty1, return_ty2)?;
                 for (it1, it2) in input_tys1.iter().zip(input_tys2.iter()) {
-                    self.match_types(*it1, *it2);
+                    self.match_types(*it1, *it2)?;
                 }
             }
             (Type::Struct { params: st1, .. }, Type::Struct { params: st2, .. }) => {
@@ -959,7 +964,23 @@ impl<'a> Semantic<'a> {
                 let st2 = self.parser.id_vec(st2).clone();
 
                 for (ty1, ty2) in st1.iter().zip(st2.iter()) {
-                    self.match_types(*ty1, *ty2);
+                    self.match_types(*ty1, *ty2)?;
+                }
+            }
+            (Type::StructLiteral(st1), Type::Struct { params: st2, .. }) => {
+                let st1 = self.parser.id_vec(st1).clone();
+                let st2 = self.parser.id_vec(st2).clone();
+
+                for (ty1, ty2) in st1.iter().zip(st2.iter()) {
+                    self.match_types(*ty1, *ty2)?;
+                }
+            }
+            (Type::Struct { params: st1, .. }, Type::StructLiteral(st2)) => {
+                let st1 = self.parser.id_vec(st1).clone();
+                let st2 = self.parser.id_vec(st2).clone();
+
+                for (ty1, ty2) in st1.iter().zip(st2.iter()) {
+                    self.match_types(*ty1, *ty2)?;
                 }
             }
             (Type::Enum { params: et1, .. }, Type::Enum { params: et2, .. }) => {
@@ -967,31 +988,32 @@ impl<'a> Semantic<'a> {
                 let et2 = self.parser.id_vec(et2).clone();
 
                 for (ty1, ty2) in et1.iter().zip(et2.iter()) {
-                    self.match_types(*ty1, *ty2);
+                    self.match_types(*ty1, *ty2)?;
                 }
             }
-            (Type::Struct { params: st, .. }, Type::Enum { params: et, .. }) => {
-                self.match_struct_to_enum(st, et);
+            (Type::StructLiteral(st), Type::Enum { params: et, .. }) => {
+                self.match_struct_to_enum(st, et)?;
             }
-            (Type::Enum { params: et, .. }, Type::Struct { params: st, .. }) => {
-                self.match_struct_to_enum(st, et);
+            (Type::Enum { params: et, .. }, Type::StructLiteral(st)) => {
+                self.match_struct_to_enum(st, et)?;
             }
             (Type::Pointer(pt1), Type::Pointer(pt2)) => {
-                self.match_types(pt1, pt2);
+                self.match_types(pt1, pt2)?;
             }
             (Type::Array(at1), Type::Array(at2)) => {
-                self.match_types(at1, at2);
+                self.match_types(at1, at2)?;
             }
             (Type::Tokens, Type::Tokens) => (),
             (Type::String, Type::String) => (),
             (Type::Basic(bt1), Type::Basic(bt2)) if bt1 == bt2 => (),
             (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => self.check_int_literal_type(bt),
             (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => self.check_int_literal_type(bt),
+            (Type::StructLiteral(_), Type::StructLiteral(_)) => (), // could be two enum variants in which case they wouldn't appear to match
             (Type::Type, _) => (),
             (_, Type::Type) => (),
             (Type::Unassigned, _) => (),
             (_, Type::Unassigned) => (),
-            (_, _) => todo!("type mismatch: {:?} vs {:?}", self.types[ty1], self.types[ty2]),
+            (_, _) => return Err(CompileError::from_string(format!("type mismatch: {:?} vs {:?} (ty2 is at {:?})", self.types[ty1], self.types[ty2], self.parser.ranges[ty2]), self.parser.ranges[ty1])),
         } 
 
         let id1 = self.find_type_array_index(ty1);
@@ -1012,10 +1034,12 @@ impl<'a> Semantic<'a> {
             }
             (_, _) => (),
         }
+
+        Ok(())
     }
 
     // todo(chad): only should match enum to struct if it's a struct literal -- NOT a real struct
-    fn match_struct_to_enum(&mut self, st: IdVec, et: IdVec) {
+    fn match_struct_to_enum(&mut self, st: IdVec, et: IdVec) -> Result<(), CompileError> {
         let struct_params = self.get_struct_params(st);
         let enum_params = self.get_struct_params(et);
 
@@ -1025,7 +1049,7 @@ impl<'a> Semantic<'a> {
         let (name, (st, _)) = struct_params.iter().next().unwrap();
         let (et, _) = enum_params.get(name).unwrap();
 
-        self.match_types(*st, *et);
+        self.match_types(*st, *et)
     }
 
     fn get_poly_copy(&self, id: Id) -> Option<Id> {
@@ -1037,9 +1061,24 @@ impl<'a> Semantic<'a> {
         }
     }
 
-    pub fn unify_types(&mut self, final_pass: bool) -> Result<(), CompileError> {
+    pub fn is_concrete(&self, id: Id) -> bool {
+        match self.types[id] {
+            Type::Type
+            | Type::Unassigned
+            | Type::Basic(BasicType::IntLiteral)
+            | Type::StructLiteral(_) => false,
+            Type::Array(ty) => self.is_concrete(ty),
+            _ => true,
+        }
+    }
+
+    pub fn unify_types(&mut self) -> Result<(), CompileError> {
         let mut to_clear = Vec::new();
 
+        let mut future_matches = Vec::new();
+        let mut future_enum_matches = Vec::new();
+        
+        // todo(chad): @Performance
         for uid in 0..self.type_matches.len() {
             println!("\n********* Unifying *********");
 
@@ -1055,31 +1094,57 @@ impl<'a> Semantic<'a> {
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
-                .filter(|(ty, _)| {
-                    self.types[*ty as usize].is_concrete()
-                })
+                .filter(|(ty, _)| self.is_concrete(*ty))
                 .map(|(ty, _)| ty)
                 .collect::<Vec<_>>();
 
             // set all types to whatever we unified to
             if let Some(&ty) = tys.first() {
+                to_clear.push(uid);
+
                 println!(
                     "setting all to {:?} (from {:?})",
                     self.types[ty as usize],
                     self.parser.debug(ty as _)
                 );
 
-                for id in self.type_matches[uid].iter() {
-                    self.types[*id] = self.types[ty as usize].clone();
-                }
+                for id in self.type_matches[uid].clone() {
+                    // if setting a struct literal to a struct/enum, do more matching on the fields
+                    match self.types[id] {
+                        Type::StructLiteral(lit_params) => match self.types[ty as usize] {
+                            Type::Struct { params, .. } => {
+                                // todo(chad): make this a method
+                                // todo(chad): check they have the same number of arguments
+                                let st1 = self.parser.id_vec(lit_params).clone();
+                                let st2 = self.parser.id_vec(params).clone();
 
-                to_clear.push(uid);
+                                for (ty1, ty2) in st1.iter().zip(st2.iter()) {
+                                    future_matches.push((*ty1, *ty2));
+                                }
+                            },
+                            Type::Enum { params, .. } => {
+                                future_enum_matches.push((lit_params, params));
+                            },
+                            _ => unreachable!()
+                        }
+                        _ => ()
+                    }
+
+                    self.types[id] = self.types[ty as usize];
+                }
             }
         }
 
         to_clear.reverse();
         for uid in to_clear {
             self.type_matches.remove(uid);
+        }
+
+        for (id1, id2) in future_matches {
+            self.match_types(id1, id2)?;
+        }
+        for (lit_params, params) in future_enum_matches {
+            self.match_struct_to_enum(lit_params, params)?;
         }
 
         Ok(())

@@ -80,6 +80,7 @@ pub enum Type {
         params: IdVec,
         copied_from: Option<Id>,
     },
+    StructLiteral(IdVec),
     Enum {
         params: IdVec,
         copied_from: Option<Id>,
@@ -97,23 +98,16 @@ impl Type {
         }
     }
 
-    pub fn is_concrete(&self) -> bool {
-        match self {
-            Type::Type | Type::Unassigned | Type::Basic(BasicType::IntLiteral) => false,
-            _ => true,
-        }
-    }
+    // pub fn is_coercble(&self) -> bool {
+    //     if self.is_concrete() {
+    //         return true;
+    //     }
 
-    pub fn is_coercble(&self) -> bool {
-        if self.is_concrete() {
-            return true;
-        }
-
-        match self {
-            Type::Basic(BasicType::IntLiteral) => true,
-            _ => false,
-        }
-    }
+    //     match self {
+    //         Type::Basic(BasicType::IntLiteral) => true,
+    //         _ => false,
+    //     }
+    // }
 }
 
 impl Into<Type> for BasicType {

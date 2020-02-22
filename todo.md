@@ -7,6 +7,7 @@
   - [x] set enum tag when assigning to field through a dot
   - [ ] support `#tag_of()`
   - [ ] check enum tag when accessing through a field
+- [ ] passing named params out of order, default params, unnamed params for structs
 - [ ] generics
   - [x] for functions
   - [x] for structs

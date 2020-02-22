@@ -167,7 +167,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             for t in self.semantic.topo.clone() {
                 self.semantic.assign_type(t)?;
             }
-            self.semantic.unify_types(true)?;
+            self.semantic.unify_types()?;
             for t in self.semantic.topo.clone() {
                 self.compile_id(t)?;
             }
@@ -188,7 +188,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             }
         }
 
-        self.semantic.unify_types(true)?;
+        self.semantic.unify_types()?;
         if !self.semantic.type_matches.is_empty() && !self.semantic.type_matches[0].is_empty() {
             CompileError::from_string(
                 "Failed to unify types",
@@ -1777,9 +1777,10 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         // 64-bit length + ptr
         Type::Array(_) | Type::String => module.isa().pointer_bytes() as u32 + 8,
         _ => todo!(
-            "type_size for {:?} ({}) with node id {}",
+            "type_size for {:?} ({:?}) with node id {}",
             &semantic.types[id],
-            semantic.parser.debug(id),
+            // semantic.parser.debug(id),
+            semantic.parser.nodes[id],
             id,
         ),
     }
