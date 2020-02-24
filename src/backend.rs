@@ -1,7 +1,9 @@
 use crate::parser::{BasicType, CompileError, Id, Lexeme, Node, Parser, Range, Token, Type};
 use crate::semantic::Semantic;
 
-use cranelift::codegen::ir::{FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{
+    condcodes::IntCC, FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind,
+};
 use cranelift::prelude::{
     types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
@@ -340,9 +342,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let mut module: Module<SimpleJITBackend> = {
                     let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
                     jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-                    // jit_builder.symbol("__macro_insert", macro_insert as *const u8);
-                    // jit_builder.symbol("__prepare_unquote", prepare_unquote as *const u8);
-                    jit_builder.symbol("print_int", print_int as *const u8);
+                    jit_builder.symbol("print_i64", print_i64 as *const u8);
                     jit_builder.symbol("print_string", print_string as *const u8);
                     for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
                         jit_builder.symbol(self.resolve_symbol(name), ptr.0);
@@ -575,7 +575,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
             jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-            jit_builder.symbol("print_int", print_int as *const u8);
+            jit_builder.symbol("print_i64", print_i64 as *const u8);
             jit_builder.symbol("print_string", print_string as *const u8);
             for (&name, &ptr) in crate::backend::FUNC_PTRS.lock().unwrap().iter() {
                 jit_builder.symbol(self.resolve_symbol(name), ptr.0);
@@ -710,6 +710,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         fb.builder.seal_all_blocks();
         fb.builder.finalize();
 
+        // Debug macro
         // println!("{}", ctx.func.display(None));
 
         module.define_function(func, &mut ctx).unwrap();
@@ -1039,6 +1040,20 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     self.backend.semantic.parser.node_is_addressable[resolved];
                 self.backend.values[id] = self.backend.values[resolved];
 
+                Ok(())
+            }
+            Node::EqEq(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                // todo(chad): @Optimization utilize the `br_icmp` instruction in cranelift for the `if a == b` or `if a != b` case
+                let value = self.builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
                 Ok(())
             }
             // Node::Add(lhs, rhs) => {
@@ -1537,6 +1552,11 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
+            Node::Cast(expr) => {
+                self.compile_id(expr)?;
+                self.backend.values[id] = self.backend.values[expr];
+                Ok(())
+            }
             Node::TypeOf(expr) => {
                 let expr_ty = self.backend.semantic.types[expr];
 
@@ -1550,15 +1570,16 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 let tag = match expr_ty {
                     Type::Basic(BasicType::I8) => 0,
                     Type::Basic(BasicType::I16) => 1,
-                    Type::Basic(BasicType::I64) => 2,
-                    Type::Basic(BasicType::F32) => 3,
-                    Type::Basic(BasicType::F64) => 4,
-                    Type::String => 5,
-                    Type::Pointer(_) => 6,
-                    Type::Array(_) => 7,
-                    Type::Struct { .. } => 8,
-                    Type::Enum { .. } => 9,
-                    Type::Func { .. } => 10,
+                    Type::Basic(BasicType::I32) => 2,
+                    Type::Basic(BasicType::I64) => 3,
+                    Type::Basic(BasicType::F32) => 4,
+                    Type::Basic(BasicType::F64) => 5,
+                    Type::String => 6,
+                    Type::Pointer(_) => 7,
+                    Type::Array(_) => 8,
+                    Type::Struct { .. } => 0,
+                    Type::Enum { .. } => 10,
+                    Type::Func { .. } => 11,
                     _ => todo!("support #type_of for other types"),
                 };
                 let tag = self.builder.ins().iconst(types::I64, tag);
@@ -1801,7 +1822,7 @@ fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
     FUNC_PTRS.lock().unwrap().get(&sym).unwrap().0
 }
 
-fn print_int(n: i64) {
+fn print_i64(n: i64) {
     println!("{}", n);
 }
 

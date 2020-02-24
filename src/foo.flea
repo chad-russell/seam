@@ -10,7 +10,7 @@ macro mac_id(t: Tokens) Tokens {
 }
 
 mac_id! {
-    extern print_int(i: i64) i64;
+    extern print_i64(i: i64) i64;
 }
 
 // enum Token {
@@ -102,56 +102,58 @@ fn main() i64 {
 
     // return old_tests();
 
-    let n: i64 = 10;
-    println(n);
+    let n: i64 = 18;
+    println(&n);
+    println(&"hello");
 
     return 0;
 }
 
-fn println<T: Type>(val: T) i64 {
-    let t: Ty = #type_of(val);
+fn println<T: Type>(val: *T) i64 {
+    let t: Ty = #type_of(^val);
 
-    if #tag_check(val.I8) {
+    let casted_type: *struct { tag: i64 } = #cast &t;
+    let tag = casted_type.tag;
+
+    if tag == 0 {
         print_str(&"I8");
     }
-    if #tag_check(val.I16) {
+    if tag == 1 {
         print_str(&"I16");
     }
-    if #tag_check(val.I32) {
+    if tag == 2 {
         print_str(&"I32");
     }
-    if #tag_check(val.I64) {
-        print_str(&"I64");
+    if tag == 3 {
+        let casted: *i64 = #cast val;
+        print_i64(^casted);
     }
-    if #tag_check(val.F32) {
+    if tag == 4 {
         print_str(&"F32");
     }
-    if #tag_check(val.F64) {
+    if tag == 5 {
         print_str(&"F64");
     }
-    if #tag_check(val.F64) {
-        print_str(&"F64");
-    }
-    if #tag_check(val.String) {
+    if tag == 6 {
         print_str(&"String");
     }
-    if #tag_check(val.Pointer) {
+    if tag == 7 {
         print_str(&"Pointer");
     }
-    if #tag_check(val.Array) {
+    if tag == 8 {
         print_str(&"Array");
     }
-    if #tag_check(val.Struct) {
+    if tag == 9 {
         print_str(&"Struct");
     }
-    if #tag_check(val.Enum) {
+    if tag == 10 {
         print_str(&"Enum");
     }
-    if #tag_check(val.Func) {
+    if tag == 11 {
         print_str(&"Func");
     }
 
-    return 0;
+    return tag;
 }
 
 // fn ct<p: struct{val: T}, T: Type>() i64 {

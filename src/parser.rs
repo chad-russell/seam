@@ -44,6 +44,13 @@ impl Range {
     pub fn new(start: Location, end: Location) -> Self {
         Self { start, end }
     }
+
+    pub fn spanning(start: Range, end: Range) -> Self {
+        Self {
+            start: start.start,
+            end: end.end,
+        }
+    }
 }
 
 impl std::fmt::Debug for Range {
@@ -140,6 +147,7 @@ pub enum Token {
     Bang,
     Dot,
     Asterisk,
+    EqEq,
     Eq,
     Comma,
     Struct,
@@ -149,6 +157,7 @@ pub enum Token {
     Extern,
     Tokens,
     TypeOf,
+    Cast,
     If,
     Else,
     True,
@@ -411,6 +420,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("else", Token::Else) {
             return;
         }
+        if self.prefix_keyword("#cast", Token::Cast) {
+            return;
+        }
         if self.prefix_keyword("#type_of", Token::TypeOf) {
             return;
         }
@@ -491,6 +503,9 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix("!", Token::Bang) {
+            return;
+        }
+        if self.prefix("==", Token::EqEq) {
             return;
         }
         if self.prefix("=", Token::Eq) {
@@ -777,6 +792,8 @@ pub enum Node {
         index: Id,
     },
     TypeOf(Id),
+    Cast(Id),
+    EqEq(Id, Id),
     // Add(Id, Id),
     // Sub(Id, Id),
     // Mul(Id, Id),
@@ -1111,6 +1128,9 @@ impl<'a> Parser<'a> {
     fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
         self.expect(&Token::If)?;
 
+        if start.line == 114 && start.col == 5 {
+            let _stopme = ();
+        }
         let cond_expr = match (&self.lexer.top.tok, &self.lexer.second.tok) {
             (Token::Symbol(_), Token::LCurly) => self.parse_symbol()?,
             _ => self.parse_expression()?,
@@ -1169,6 +1189,85 @@ impl<'a> Parser<'a> {
     // }
 
     pub fn parse_expression(&mut self) -> Result<Id, CompileError> {
+        let mut operators = Vec::new();
+        let mut output = Vec::new();
+
+        let (mut parsing_op, mut parsing_expr) = (false, true);
+
+        loop {
+            match self.lexer.top.tok {
+                Token::EqEq => {
+                    if !parsing_op {
+                        break;
+                    }
+
+                    // todo(chad): operator precedence
+                    operators.push(self.lexer.top.tok);
+                    self.lexer.pop();
+                }
+                Token::IntegerLiteral(_)
+                | Token::FloatLiteral(_)
+                | Token::StringLiteral(_)
+                | Token::Ampersand
+                | Token::Caret
+                | Token::True
+                | Token::False
+                | Token::LCurly
+                | Token::LSquare
+                | Token::TypeOf
+                | Token::LParen
+                | Token::Cast
+                | Token::Symbol(_)
+                | Token::I8
+                | Token::I16
+                | Token::I32
+                | Token::I64 => {
+                    if !parsing_expr {
+                        break;
+                    }
+
+                    let id = self.parse_expression_piece()?;
+                    output.push(Shunting::Id(id))
+                }
+                _ => break,
+            }
+
+            std::mem::swap(&mut parsing_op, &mut parsing_expr);
+        }
+
+        while !operators.is_empty() {
+            output.push(Shunting::Operator(operators.pop().unwrap()));
+        }
+
+        if output.len() == 1 {
+            return Ok(match output[0] {
+                Shunting::Id(id) => id,
+                _ => unreachable!(),
+            });
+        }
+
+        self.shunting_unroll(&mut output)
+    }
+
+    fn shunting_unroll(&mut self, output: &mut Vec<Shunting>) -> Result<Id, CompileError> {
+        match output.last().unwrap() {
+            Shunting::Operator(Token::EqEq) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::EqEq(lhs, rhs)))
+            }
+            Shunting::Id(id) => Err(CompileError::from_string(
+                "Could not parse operator",
+                self.ranges[*id],
+            )),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn parse_expression_piece(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok {
             Token::IntegerLiteral(_) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
             Token::StringLiteral(sym) => {
@@ -1251,7 +1350,19 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expression()?;
                 let range = self.expect_range(start, Token::RParen)?;
 
-                Ok(self.push_node(range, Node::TypeOf(expr)))
+                let id = self.push_node(range, Node::TypeOf(expr));
+                self.node_is_addressable[id] = true;
+
+                Ok(id)
+            }
+            Token::Cast => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `#cast`
+                let expr = self.parse_expression_piece()?;
+
+                let range = Range::new(start, self.ranges[expr].end);
+
+                Ok(self.push_node(range, Node::Cast(expr)))
             }
             _ => {
                 let start = self.lexer.top.range.start;
@@ -1839,4 +1950,26 @@ impl<'a> Parser<'a> {
     pub fn id_vec_mut(&mut self, idv: IdVec) -> &mut Vec<Id> {
         &mut self.id_vecs[idv.0]
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Shunting {
+    Operator(Token),
+    Id(Id),
+}
+
+impl Shunting {
+    fn as_id(self) -> Id {
+        match self {
+            Self::Id(id) => id,
+            _ => panic!("Expected Shunting::Id"),
+        }
+    }
+
+    // fn as_operator(self) -> Token {
+    //     match self {
+    //         Self::Operator(op) => op,
+    //         _ => panic!("Expected Shunting::Id"),
+    //     }
+    // }
 }

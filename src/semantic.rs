@@ -353,6 +353,15 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
+            Node::EqEq(lhs, rhs) => {
+                self.assign_type(lhs)?;
+                self.assign_type(rhs)?;
+                self.match_types(lhs, rhs)?;
+
+                self.types[id] = Type::Basic(BasicType::Bool);
+
+                Ok(())
+            }
             // Node::Add(arg1, arg2)
             // | Node::Sub(arg1, arg2)
             // | Node::Mul(arg1, arg2)
@@ -802,6 +811,12 @@ impl<'a> Semantic<'a> {
             Node::TypeOf(expr) => {
                 self.assign_type(expr)?;
                 self.match_types(id, self.parser.ty_decl.unwrap())?;
+
+                Ok(())
+            }
+            Node::Cast(expr) => {
+                self.assign_type(expr)?;
+                self.parser.node_is_addressable[id] = self.parser.node_is_addressable[expr];
 
                 Ok(())
             }
