@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
-use std::ops::Deref;
 
 use string_interner::StringInterner;
 
@@ -12,11 +11,17 @@ pub struct IdVec(pub Id);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenVec(pub Id);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Location {
     pub line: usize,
     pub col: usize,
     pub char_offset: usize,
+}
+
+impl std::fmt::Debug for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line, self.col)
+    }
 }
 
 impl Default for Location {
@@ -29,7 +34,7 @@ impl Default for Location {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct Range {
     pub start: Location,
     pub end: Location,
@@ -38,6 +43,12 @@ pub struct Range {
 impl Range {
     pub fn new(start: Location, end: Location) -> Self {
         Self { start, end }
+    }
+}
+
+impl std::fmt::Debug for Range {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} - {:?}", self.start, self.end)
     }
 }
 
@@ -62,13 +73,11 @@ pub enum BasicType {
     None,
 }
 
-// TODO: make this copy
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Type {
     Unassigned,
     Basic(BasicType),
     Tokens,
-    Code,
     Pointer(Id),
     String,
     Func {
@@ -129,7 +138,6 @@ pub enum Token {
     Semicolon,
     Colon,
     Bang,
-    Backslash,
     Dot,
     Asterisk,
     Eq,
@@ -139,11 +147,8 @@ pub enum Token {
     Fn,
     Macro,
     Extern,
-    Insert,
-    HashCodeStmt,
-    HashCodeExpr,
-    Code,
     Tokens,
+    TypeOf,
     If,
     Else,
     True,
@@ -314,7 +319,7 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn resolve_unchecked(&self, sym: Sym) -> &str {
-        self.string_interner.deref().resolve(sym).unwrap()
+        self.string_interner.resolve(sym).unwrap()
     }
 
     fn prefix(&mut self, pat: &str, tok: Token) -> bool {
@@ -406,16 +411,7 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("else", Token::Else) {
             return;
         }
-        if self.prefix_keyword("#insert", Token::Insert) {
-            return;
-        }
-        if self.prefix_keyword("#code_stmt", Token::HashCodeStmt) {
-            return;
-        }
-        if self.prefix_keyword("#code_expr", Token::HashCodeExpr) {
-            return;
-        }
-        if self.prefix_keyword("Code", Token::Code) {
+        if self.prefix_keyword("#type_of", Token::TypeOf) {
             return;
         }
         if self.prefix_keyword("Tokens", Token::Tokens) {
@@ -495,9 +491,6 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix("!", Token::Bang) {
-            return;
-        }
-        if self.prefix("\\", Token::Backslash) {
             return;
         }
         if self.prefix("=", Token::Eq) {
@@ -637,6 +630,8 @@ pub struct Parser<'a> {
     pub calls: Vec<Id>,
     pub top_level_map: BTreeMap<Sym, Id>,
 
+    pub ty_decl: Option<Id>,
+
     // todo(chad): turn these into tokens
     sym_let: Sym,
     sym_return: Sym,
@@ -738,11 +733,6 @@ pub enum Node {
         params: IdVec,
         return_ty: Id,
     },
-    Insert {
-        stmts: IdVec,
-        unquotes: IdVec,
-    },
-    Code(IdVec),
     DeclParam {
         name: Sym,
         ty: Id,
@@ -757,7 +747,7 @@ pub enum Node {
     },
     Enum {
         name: Sym,
-        // todo(chad): ct_params
+        ct_params: Option<IdVec>,
         params: IdVec,
     },
     ValueParam {
@@ -786,7 +776,7 @@ pub enum Node {
         arr: Id,
         index: Id,
     },
-    Unquote(Id),
+    TypeOf(Id),
     // Add(Id, Id),
     // Sub(Id, Id),
     // Mul(Id, Id),
@@ -871,6 +861,7 @@ impl<'a> Parser<'a> {
             current_unquote: IdVec(0),
             parsed_unquotes: Default::default(),
             is_in_insert: false,
+            ty_decl: None,
             sym_let,
             sym_return,
             sym_none,
@@ -981,12 +972,6 @@ impl<'a> Parser<'a> {
                     }),
                 ))
             }
-            Token::Code => {
-                let range = self.lexer.top.range;
-                self.lexer.pop(); // `Code`
-
-                Ok(self.push_node(range, Node::TypeLiteral(Type::Code)))
-            }
             Token::Tokens => {
                 let range = self.lexer.top.range;
                 self.lexer.pop(); // `Tokens`
@@ -1088,12 +1073,14 @@ impl<'a> Parser<'a> {
                     Ok(self.push_node(range, Node::TypeLiteral(BasicType::Bool.into())))
                 } else if sym == self.sym_string {
                     Ok(self.push_node(range, Node::TypeLiteral(Type::String)))
-                } else if self.lexer.top.tok == Token::LAngle {
-                    // self.lexer.pop();
-                    // self.expect(&Token::LParen);
-                    // let ct_params = self.parse_value_params();
-                    // self.expect(&Token::RParen);
-                    todo!("parse polymorph type");
+                // } else if self.lexer.top.tok == Token::LAngle {
+                //     self.lexer.pop(); // `<`
+                //     let ct_params = self.parse_value_params(true)?;
+                //     let range = self.expect_range(range.start, Token::RAngle)?;
+                //     Ok(self.push_node(
+                //         range,
+                //         Node::TypeLiteral(Type::PolymorphSpecification(ct_params)),
+                //     ))
                 } else {
                     Ok(ident)
                 }
@@ -1203,7 +1190,7 @@ impl<'a> Parser<'a> {
                 self.string_literal_offset += bytes;
                 self.string_literals.push(string_id);
 
-                // it's a struct, so addressable (for now)
+                // structs are always addressable (for now)
                 self.node_is_addressable[string_id] = true;
 
                 Ok(string_id)
@@ -1228,51 +1215,6 @@ impl<'a> Parser<'a> {
 
                 Ok(self.push_node(Range::new(start, end), Node::Load(expr)))
             }
-            Token::HashCodeStmt => {
-                let start = self.lexer.top.range.start;
-
-                self.lexer.pop(); // `#code_stmt`
-
-                self.current_unquote = self.push_id_vec(Vec::new());
-                self.unquote_scope = self.top_scope;
-
-                // open a new scope
-                let pushed_scope = self.push_scope(false);
-
-                self.expect(&Token::LCurly)?;
-                let mut stmts = Vec::new();
-                while self.lexer.top.tok != Token::RCurly {
-                    stmts.push(self.parse_fn_stmt()?);
-                }
-                let stmts = self.push_id_vec(stmts);
-                let range = self.expect_range(start, Token::RCurly)?;
-
-                self.pop_scope(pushed_scope);
-
-                Ok(self.push_node(range, Node::Code(stmts)))
-            }
-            Token::HashCodeExpr => {
-                let start = self.lexer.top.range.start;
-
-                self.lexer.pop(); // `#code_expr`
-
-                self.current_unquote = self.push_id_vec(Vec::new());
-                self.unquote_scope = self.top_scope;
-
-                // open a new scope
-                let pushed_scope = self.push_scope(false);
-
-                self.expect(&Token::LCurly)?;
-                let mut stmts = Vec::new();
-                stmts.push(self.parse_expression()?);
-                let stmts = self.push_id_vec(stmts);
-                let range = self.expect_range(start, Token::RCurly)?;
-
-                self.pop_scope(pushed_scope);
-
-                Ok(self.push_node(range, Node::Code(stmts)))
-            }
-            Token::Backslash => self.parse_unquote(),
             Token::True => {
                 let range = self.lexer.top.range;
                 self.lexer.pop(); // `true`
@@ -1304,6 +1246,15 @@ impl<'a> Parser<'a> {
                 let range = self.expect_range(start, Token::RCurly)?;
 
                 Ok(self.push_node(range, Node::ArrayLiteral(params)))
+            }
+            Token::TypeOf => {
+                let start = self.lexer.top.range.start;
+                self.lexer.pop(); // `#type_of`
+                self.expect(&Token::LParen)?;
+                let expr = self.parse_expression()?;
+                let range = self.expect_range(start, Token::RParen)?;
+
+                Ok(self.push_node(range, Node::TypeOf(expr)))
             }
             _ => {
                 let start = self.lexer.top.range.start;
@@ -1423,26 +1374,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_unquote(&mut self) -> Result<Id, CompileError> {
-        let start = self.lexer.top.range.start;
-        self.lexer.pop(); // `\`
-
-        let old_top_scope = self.top_scope;
-        self.top_scope = self.unquote_scope;
-
-        let expr = self.parse_symbol()?;
-        let end = self.ranges[expr].end;
-
-        let unquote = self.push_node(Range::new(start, end), Node::Unquote(expr));
-
-        self.id_vec_mut(self.current_unquote).push(unquote);
-        self.parsed_unquotes.push(unquote);
-
-        self.top_scope = old_top_scope;
-
-        Ok(unquote)
-    }
-
     fn parse_lvalue(&mut self) -> Result<Id, CompileError> {
         if self.lexer.top.tok == Token::LParen {
             self.lexer.pop(); // `(`
@@ -1503,7 +1434,6 @@ impl<'a> Parser<'a> {
 
         match self.lexer.top.tok {
             Token::If => self.parse_if(start),
-            Token::Backslash => self.parse_unquote(),
             Token::Symbol(sym) if sym == self.sym_return => {
                 self.lexer.pop(); // `return`
                 let expr = self.parse_expression()?;
@@ -1545,35 +1475,6 @@ impl<'a> Parser<'a> {
                 self.local_insert(let_id);
 
                 Ok(let_id)
-            }
-            Token::Insert => {
-                self.lexer.pop(); // `#insert`
-
-                self.current_unquote = self.push_id_vec(Vec::new());
-                self.unquote_scope = self.top_scope;
-
-                // open a new scope
-                let pushed_scope = self.push_scope(false);
-                self.is_in_insert = true;
-
-                self.expect(&Token::LCurly)?;
-                let mut stmts = Vec::new();
-                while self.lexer.top.tok != Token::RCurly {
-                    stmts.push(self.parse_fn_stmt()?);
-                }
-                let stmts = self.push_id_vec(stmts);
-                let range = self.expect_range(start, Token::RCurly)?;
-
-                self.pop_scope(pushed_scope);
-                self.is_in_insert = false;
-
-                Ok(self.push_node(
-                    range,
-                    Node::Insert {
-                        stmts,
-                        unquotes: self.current_unquote,
-                    },
-                ))
             }
             _ => {
                 let lvalue = self.parse_expression()?;
@@ -1819,22 +1720,7 @@ impl<'a> Parser<'a> {
 
         match self.lexer.top.tok {
             Token::Struct => self.parse_struct(start),
-            Token::Enum => {
-                self.lexer.pop();
-                let name = self.parse_sym()?;
-
-                self.expect(&Token::LCurly)?;
-                let params = self.parse_params(false)?;
-                let range = self.expect_range(start, Token::RCurly)?;
-
-                let id = self.push_node(range, Node::Enum { name, params });
-
-                if !self.copying {
-                    self.scope_insert(name, id);
-                }
-
-                Ok(id)
-            }
+            Token::Enum => self.parse_enum(start),
             Token::Extern => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `extern`
@@ -1905,9 +1791,42 @@ impl<'a> Parser<'a> {
         Ok(id)
     }
 
-    // pub fn debug_sym(&self, sym: Sym) -> String {
-    //     String::from(self.lexer.string_interner.resolve(sym).unwrap())
-    // }
+    pub fn parse_enum(&mut self, start: Location) -> Result<Id, CompileError> {
+        self.lexer.pop();
+        let name = self.parse_sym()?;
+
+        let ct_params = if self.lexer.top.tok == Token::LAngle {
+            self.lexer.pop(); // `<`
+            let params = self.parse_params(true)?;
+            self.expect(&Token::RAngle)?;
+            Some(params)
+        } else {
+            None
+        };
+
+        self.expect(&Token::LCurly)?;
+        let params = self.parse_params(false)?;
+        let range = self.expect_range(start, Token::RCurly)?;
+
+        let id = self.push_node(
+            range,
+            Node::Enum {
+                name,
+                ct_params,
+                params,
+            },
+        );
+
+        if self.ty_decl == None && self.resolve_sym_unchecked(name) == "Ty" {
+            self.ty_decl = Some(id);
+        }
+
+        if !self.copying {
+            self.scope_insert(name, id);
+        }
+
+        Ok(id)
+    }
 
     pub fn debug(&self, id: Id) -> String {
         let range = self.ranges[id];
@@ -1919,6 +1838,7 @@ impl<'a> Parser<'a> {
         &self.id_vecs[idv.0]
     }
 
+    #[allow(dead_code)]
     pub fn id_vec_mut(&mut self, idv: IdVec) -> &mut Vec<Id> {
         &mut self.id_vecs[idv.0]
     }

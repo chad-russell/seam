@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, Node, Parser, Type, IdVec};
+use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
 
 type Sym = usize;
 
@@ -112,7 +112,7 @@ impl<'a> Semantic<'a> {
         let is_poly = match &self.parser.nodes[id] {
             Node::Func { ct_params, .. } => ct_params.is_some(),
             Node::Struct { ct_params, .. } => ct_params.is_some(),
-            // Node::Enum { ct_params, .. } => ct_params.is_some(),
+            Node::Enum { ct_params, .. } => ct_params.is_some(),
             _ => false,
         };
 
@@ -191,7 +191,7 @@ impl<'a> Semantic<'a> {
             Node::If {
                 cond,
                 true_stmts,
-                false_stmts
+                false_stmts,
             } => {
                 self.assign_type(cond)?;
 
@@ -201,7 +201,6 @@ impl<'a> Semantic<'a> {
                 for stmt in self.parser.id_vec(false_stmts).clone() {
                     self.assign_type(stmt)?;
                 }
-                
                 Ok(())
             }
             Node::Field {
@@ -234,18 +233,23 @@ impl<'a> Semantic<'a> {
                         match field_name {
                             "len" => {
                                 self.types[id] = Type::Basic(BasicType::I64);
-                            },
+                            }
                             "buf" => {
                                 // todo(chad): maybe make StringPointer its own type or something?
                                 // or have Ids that will always reference basic types
                                 self.types[id] = Type::Type;
-                            },
-                            _ => return Err(CompileError::from_string("Valid fields on strings are 'len' or 'buf'", self.parser.ranges[id])),
+                            }
+                            _ => {
+                                return Err(CompileError::from_string(
+                                    "Valid fields on strings are 'len' or 'buf'",
+                                    self.parser.ranges[id],
+                                ))
+                            }
                         }
 
-                        return Ok(())
+                        return Ok(());
                     }
-                    _ => ()
+                    _ => (),
                 }
 
                 let params = self.types[unpointered_ty].as_struct_params().ok_or(
@@ -273,9 +277,22 @@ impl<'a> Semantic<'a> {
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
-                        format!("field '{}' not found: fields are {:?}", 
-                            self.parser.lexer.string_interner.resolve(field_name).unwrap(),
-                            params.iter().map(|(sym, _)| self.parser.lexer.string_interner.resolve(*sym).unwrap()).collect::<Vec<_>>(),
+                        format!(
+                            "field '{}' not found: fields are {:?}",
+                            self.parser
+                                .lexer
+                                .string_interner
+                                .resolve(field_name)
+                                .unwrap(),
+                            params
+                                .iter()
+                                .map(|(sym, _)| self
+                                    .parser
+                                    .lexer
+                                    .string_interner
+                                    .resolve(*sym)
+                                    .unwrap())
+                                .collect::<Vec<_>>(),
                         ),
                         self.parser.ranges[id],
                     )),
@@ -290,10 +307,14 @@ impl<'a> Semantic<'a> {
                 self.assign_type(index)?;
 
                 let array_ty = match self.types[arr] {
-                    Type::Array(ty) => {
-                        Ok(ty)
-                    },
-                    _ => Err(CompileError::from_string(format!("Cannot perform array access on non-array type {:?}", &self.types[id]), self.parser.ranges[id]))
+                    Type::Array(ty) => Ok(ty),
+                    _ => Err(CompileError::from_string(
+                        format!(
+                            "Cannot perform array access on non-array type {:?}",
+                            &self.types[id]
+                        ),
+                        self.parser.ranges[id],
+                    )),
                 }?;
                 self.match_types(id, array_ty)?;
 
@@ -321,9 +342,12 @@ impl<'a> Semantic<'a> {
                 let params = self.parser.id_vec(params).clone();
 
                 // todo(chad): Allow zero-element array literals?
-                let matcher = params.first()
-                    .cloned()
-                    .ok_or_else(|| CompileError::from_string("Cannot have a zero-element array literal", self.parser.ranges[id]))?;
+                let matcher = params.first().cloned().ok_or_else(|| {
+                    CompileError::from_string(
+                        "Cannot have a zero-element array literal",
+                        self.parser.ranges[id],
+                    )
+                })?;
                 for &param in params.iter() {
                     self.assign_type(param)?;
                     if param != matcher {
@@ -369,14 +393,14 @@ impl<'a> Semantic<'a> {
             //     Ok(())
             // }
             Node::Func {
-                name: _,   // Sym,
-                scope: _,  // Id,
-                ct_params, // IdVec,
-                params,    // IdVec,
-                return_ty, // Id,
-                stmts,     // IdVec,
-                returns,   // IdVec,
-                is_macro: _,  // bool,
+                name: _,     // Sym,
+                scope: _,    // Id,
+                ct_params,   // IdVec,
+                params,      // IdVec,
+                return_ty,   // Id,
+                stmts,       // IdVec,
+                returns,     // IdVec,
+                is_macro: _, // bool,
             } => {
                 if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
@@ -427,7 +451,7 @@ impl<'a> Semantic<'a> {
                 self.types[id] = Type::Func {
                     return_ty,
                     input_tys: params,
-                    copied_from: None
+                    copied_from: None,
                 };
 
                 Ok(())
@@ -541,7 +565,7 @@ impl<'a> Semantic<'a> {
                         self.assign_type(array_ty)?;
                         self.types[id] = ty.clone();
                     }
-                    Type::Code | Type::Tokens => {
+                    Type::Tokens => {
                         self.types[id] = ty.clone();
                     }
                     Type::Unassigned => unreachable!(),
@@ -562,7 +586,7 @@ impl<'a> Semantic<'a> {
                     Node::Extern { params, .. } => params,
                     _ => match &self.types[name] {
                         Type::Func { input_tys, .. } => input_tys,
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     },
                 };
                 let decl = self.parser.id_vec(*decl).clone();
@@ -598,7 +622,10 @@ impl<'a> Semantic<'a> {
                         // otherwise what the heck are we trying to call?
                         _ => {
                             return Err(CompileError::from_string(
-                                &format!("Cannot call a non-func: {:?}", &self.parser.nodes[resolved_func]),
+                                &format!(
+                                    "Cannot call a non-func: {:?}",
+                                    &self.parser.nodes[resolved_func]
+                                ),
                                 self.parser.ranges[id],
                             ))
                         }
@@ -644,9 +671,9 @@ impl<'a> Semantic<'a> {
                             _ => match self.parser.nodes.get_mut(decl[index]).unwrap() {
                                 Node::DeclParam { ct_link, .. } => {
                                     *ct_link = Some(*g);
-                                },
-                                _ => unreachable!()
-                            }
+                                }
+                                _ => unreachable!(),
+                            },
                         }
                     }
                 }
@@ -668,6 +695,8 @@ impl<'a> Semantic<'a> {
                     self.match_types(*d, *g)?;
                 }
 
+                self.unify_types()?;
+
                 self.assign_type(name)?;
                 match self.types[name] {
                     Type::Func { return_ty, .. } => self.match_types(id, return_ty)?,
@@ -687,7 +716,7 @@ impl<'a> Semantic<'a> {
 
                     let copied_params = match self.parser.nodes[copied] {
                         Node::Struct { params, .. } => params,
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     };
 
                     self.types[copied] = Type::Struct {
@@ -722,27 +751,64 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Enum { name: _, params } => {
+            Node::Enum {
+                ct_params, params, ..
+            } => {
+                // for param in self.parser.id_vec(params).clone() {
+                //     self.assign_type(param)?;
+                // }
+                // self.types[id] = Type::Enum {
+                //     params: params.clone(),
+                //     copied_from: None,
+                // };
+                // Ok(())
+
+                // for recursion purposes, give the struct a placeholder type before anything else
+                self.types[id] = Type::Type;
+
+                let (ct_params, params) = if ct_params.is_some() {
+                    let copied = self.deep_copy_enum(id);
+
+                    let copied_params = match self.parser.nodes[copied] {
+                        Node::Enum { params, .. } => params,
+                        _ => unreachable!(),
+                    };
+
+                    self.types[copied] = Type::Enum {
+                        params: copied_params,
+                        copied_from: None,
+                    };
+                    self.match_types(id, copied)?;
+
+                    match &self.parser.nodes[copied] {
+                        Node::Enum {
+                            ct_params, params, ..
+                        } => (*ct_params, *params),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    self.types[id] = Type::Enum {
+                        params: params,
+                        copied_from: None,
+                    };
+
+                    (ct_params, params)
+                };
+
+                if let Some(ct_params) = ct_params {
+                    for param in self.parser.id_vec(ct_params).clone() {
+                        self.assign_type(param)?;
+                    }
+                }
                 for param in self.parser.id_vec(params).clone() {
                     self.assign_type(param)?;
                 }
-                self.types[id] = Type::Enum {
-                    params: params.clone(),
-                    copied_from: None,
-                };
-                Ok(())
-            }
-            // Node::Code
-            Node::Unquote(unq) => {
-                self.assign_type(unq)?;
-                self.match_types(id, unq)?;
 
                 Ok(())
             }
-            Node::Insert { unquotes, .. } => {
-                for unq in self.parser.id_vec(unquotes).clone() {
-                    self.assign_type(unq)?;
-                }
+            Node::TypeOf(expr) => {
+                self.assign_type(expr)?;
+                self.match_types(id, self.parser.ty_decl.unwrap())?;
 
                 Ok(())
             }
@@ -751,29 +817,6 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Code(stmts) => {
-                self.types[id] = Type::Code;
-
-                if !self.macro_phase {
-                    for stmt in self.parser.id_vec(stmts).clone() {
-                        self.assign_type(stmt)?;
-                    }
-                }
-
-                Ok(())
-            }
-            // Node::UnquotedCodeInsert(stmts) => {
-            //     for stmt in self.parser.id_vec(stmts).clone() {
-            //         self.assign_type(stmt)?;
-            //     }
-
-            //     // todo(chad): dangerous?
-            //     if let Some(&stmt) = self.parser.id_vec(stmts).first() {
-            //         self.match_types(id, stmt);
-            //     }
-
-            //     Ok(())
-            // }
             // _ => Err(CompileError::from_string(
             //     format!(
             //         "Cannot coerce type for AST node {:?}",
@@ -785,14 +828,15 @@ impl<'a> Semantic<'a> {
     }
 
     fn get_struct_params(&self, params: IdVec) -> BTreeMap<usize, (usize, u16)> {
-        self
-            .parser
+        self.parser
             .id_vec(params)
             .iter()
             .enumerate()
             .map(|(_index, id)| {
                 let (name, ty, index) = match &self.parser.nodes[*id] {
-                    Node::DeclParam { name, ty, index, .. } => Some((*name, *ty, *index)),
+                    Node::DeclParam {
+                        name, ty, index, ..
+                    } => Some((*name, *ty, *index)),
                     Node::ValueParam {
                         name,
                         value: _,
@@ -859,6 +903,27 @@ impl<'a> Semantic<'a> {
         self.parser.copying = true;
 
         let copied = self.parser.parse_struct(range.start).unwrap();
+
+        while self.types.len() < self.parser.nodes.len() {
+            self.types.push(Type::Unassigned);
+        }
+
+        copied
+    }
+
+    fn deep_copy_enum(&mut self, id: Id) -> Id {
+        // println!("copying struct!");
+
+        let range = self.parser.ranges[id];
+        let source =
+            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+
+        self.parser
+            .lexer
+            .update_source_for_copy(source, range.start);
+        self.parser.copying = true;
+
+        let copied = self.parser.parse_enum(range.start).unwrap();
 
         while self.types.len() < self.parser.nodes.len() {
             self.types.push(Type::Unassigned);
@@ -1019,15 +1084,27 @@ impl<'a> Semantic<'a> {
             (Type::Tokens, Type::Tokens) => (),
             (Type::String, Type::String) => (),
             (Type::Basic(bt1), Type::Basic(bt2)) if bt1 == bt2 => (),
-            (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => self.check_int_literal_type(bt),
-            (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => self.check_int_literal_type(bt),
+            (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => {
+                self.check_int_literal_type(bt)
+            }
+            (Type::Basic(bt), Type::Basic(BasicType::IntLiteral)) => {
+                self.check_int_literal_type(bt)
+            }
             (Type::StructLiteral(_), Type::StructLiteral(_)) => (), // could be two enum variants in which case they wouldn't appear to match
             (Type::Type, _) => (),
             (_, Type::Type) => (),
             (Type::Unassigned, _) => (),
             (_, Type::Unassigned) => (),
-            (_, _) => return Err(CompileError::from_string(format!("type mismatch: {:?} vs {:?} (ty2 is at {:?})", self.types[ty1], self.types[ty2], self.parser.ranges[ty2]), self.parser.ranges[ty1])),
-        } 
+            (_, _) => {
+                return Err(CompileError::from_string(
+                    format!(
+                        "type mismatch: {:?} vs {:?} (ty2 is at {:?})",
+                        self.types[ty1], self.types[ty2], self.parser.ranges[ty2]
+                    ),
+                    self.parser.ranges[ty1],
+                ))
+            }
+        }
 
         let id1 = self.find_type_array_index(ty1);
         let id2 = self.find_type_array_index(ty2);
@@ -1097,20 +1174,19 @@ impl<'a> Semantic<'a> {
 
         let mut future_matches = Vec::new();
         let mut future_enum_matches = Vec::new();
-        
         // todo(chad): @Performance
         for uid in 0..self.type_matches.len() {
-            println!("\n********* Unifying *********");
+            // println!("\n********* Unifying *********");
 
             let tys = self.type_matches[uid]
                 .iter()
                 .map(|&ty| {
-                    println!(
-                        "{:?} ({}) : {:?}",
-                        ty,
-                        self.parser.debug(ty),
-                        &self.types[ty],
-                    );
+                    // println!(
+                    //     "{:?} ({}) : {:?}",
+                    //     ty,
+                    //     self.parser.debug(ty),
+                    //     &self.types[ty],
+                    // );
                     (ty, self.type_specificity(ty))
                 })
                 .filter(|(_, spec)| *spec > 0)
@@ -1122,11 +1198,11 @@ impl<'a> Semantic<'a> {
             if let Some(&ty) = tys.first() {
                 to_clear.push(uid);
 
-                println!(
-                    "setting all to {:?} (from {:?})",
-                    self.types[ty as usize],
-                    self.parser.debug(ty as _)
-                );
+                // println!(
+                //     "setting all to {:?} (from {:?})",
+                //     self.types[ty as usize],
+                //     self.parser.debug(ty as _)
+                // );
 
                 for id in self.type_matches[uid].clone() {
                     // if setting a struct literal to a struct/enum, do more matching on the fields
@@ -1141,13 +1217,13 @@ impl<'a> Semantic<'a> {
                                 for (ty1, ty2) in st1.iter().zip(st2.iter()) {
                                     future_matches.push((*ty1, *ty2));
                                 }
-                            },
+                            }
                             Type::Enum { params, .. } => {
                                 future_enum_matches.push((lit_params, params));
-                            },
-                            _ => unreachable!()
-                        }
-                        _ => ()
+                            }
+                            _ => unreachable!(),
+                        },
+                        _ => (),
                     }
 
                     self.types[id] = self.types[ty as usize];

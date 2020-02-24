@@ -1,26 +1,18 @@
 # TODO
 
-- [ ] generics
-  - [x] for functions
-  - [x] for structs
-  - [ ] for enums
-  - [x] copy functions/structs when instantiating so we can do multiple
-  - [ ] baking
-  - [x] non-type (constant value) params
-  - [x] check conflicts during unification
+## Definitely Implement
+
 - [ ] type_of
+- [ ] routine to push token from a macro
 - [ ] debugging
 - [ ] basic enum support
-  - [x] set enum tag during enum literal construction
-  - [x] set enum tag when assigning to field through a dot
   - [ ] support `#tag_of()`
   - [ ] check enum tag when accessing through a field
-- [ ] passing named params out of order, default params, unnamed params for structs
 - [ ] defer
+- [ ] passing named params out of order, default params, unnamed params for structs
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] math (binary operations)
 - [ ] if
-  - [x] basic if/else statement functionality
   - [ ] as value expression
   - [ ] `else if`
 - [ ] short-circuit logical `and` and `or`
@@ -28,5 +20,11 @@
 - [ ] for (with macros?)
 - [ ] f32/f64
 - [ ] structs as function parameters / return values
-  - [ ] structs as compile-time parameters / return values
   - [ ] follow C ABI, at least for extern functions
+
+## Maybe Implement
+
+- [ ] compile-time function calls `#run()`
+- [ ] baked struct types (`let p: Poly<bool> = ---;`)
+- [ ] baked functions (`let f = poly<i64>;` and then use f as a function pointer)
+- [ ] baked funciton values (making a version of a function where one or more parameters are compile-time known)
