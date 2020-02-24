@@ -492,7 +492,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.compile_id(resolved)?;
                 self.semantic.parser.node_is_addressable[id] =
                     self.semantic.parser.node_is_addressable[resolved];
-                self.values[id] = self.values[resolved].clone();
+                self.values[id] = self.values[resolved];
 
                 Ok(())
             }
@@ -814,10 +814,12 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             Value::FuncSym(sym) => Some(self.builder.ins().iconst(types::I64, sym as i64)),
             _ => None,
         }
-        .expect(&format!(
-            "Cannot convert {:?} into a CraneliftValue",
-            &self.backend.values[id]
-        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "Cannot convert {:?} into a CraneliftValue",
+                &self.backend.values[id]
+            )
+        })
     }
 
     fn store(&mut self, id: Id, dest: &Value) {
@@ -965,50 +967,46 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             }
             Node::StructLiteral { name: _, params } => {
                 // if this typechecked as an enum, handle things a bit differently
-                match &self.backend.semantic.types[id] {
-                    Type::Enum { .. } => {
-                        let params = self.backend.semantic.parser.id_vec(params);
+                if let Type::Enum { .. } = self.backend.semantic.types[id] {
+                    let params = self.backend.semantic.parser.id_vec(params);
 
-                        assert_eq!(params.len(), 1);
-                        let param = params[0];
-                        let size = type_size(&self.backend.semantic, &self.module, param)
-                            + ENUM_TAG_SIZE_BYTES;
+                    assert_eq!(params.len(), 1);
+                    let param = params[0];
+                    let size = type_size(&self.backend.semantic, &self.module, param)
+                        + ENUM_TAG_SIZE_BYTES;
 
-                        let slot = self.builder.create_stack_slot(StackSlotData {
-                            kind: StackSlotKind::ExplicitSlot,
-                            size,
-                            offset: None,
-                        });
-                        let addr = self.builder.ins().stack_addr(
-                            self.module.isa().pointer_type(),
-                            slot,
-                            0,
-                        );
-
-                        self.backend.values[id] = Value::Value(addr);
-
-                        let index = match &self.backend.semantic.parser.nodes[param] {
-                            Node::ValueParam { index, .. } => index,
-                            _ => unreachable!(),
-                        };
-                        let tag_value = self.builder.ins().iconst(types::I16, *index as i64);
+                    let slot = self.builder.create_stack_slot(StackSlotData {
+                        kind: StackSlotKind::ExplicitSlot,
+                        size,
+                        offset: None,
+                    });
+                    let addr =
                         self.builder
                             .ins()
-                            .store(MemFlags::new(), tag_value, addr, 0);
+                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
 
-                        let tag_size_value = self
-                            .builder
-                            .ins()
-                            .iconst(types::I64, ENUM_TAG_SIZE_BYTES as i64);
-                        let addr = self.builder.ins().iadd(addr, tag_size_value);
+                    self.backend.values[id] = Value::Value(addr);
 
-                        self.compile_id(param)?;
-                        self.store(param, &addr.into());
+                    let index = match &self.backend.semantic.parser.nodes[param] {
+                        Node::ValueParam { index, .. } => index,
+                        _ => unreachable!(),
+                    };
+                    let tag_value = self.builder.ins().iconst(types::I16, *index as i64);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), tag_value, addr, 0);
 
-                        return Ok(());
-                    }
-                    _ => (),
-                };
+                    let tag_size_value = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, ENUM_TAG_SIZE_BYTES as i64);
+                    let addr = self.builder.ins().iadd(addr, tag_size_value);
+
+                    self.compile_id(param)?;
+                    self.store(param, &addr.into());
+
+                    return Ok(());
+                }
 
                 // todo(chad): @Optimization: this is about the slowest thing we could ever do, but works great.
                 // Come back later once everything is working and make it fast
@@ -1039,7 +1037,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.compile_id(resolved)?;
                 self.backend.semantic.parser.node_is_addressable[id] =
                     self.backend.semantic.parser.node_is_addressable[resolved];
-                self.backend.values[id] = self.backend.values[resolved].clone();
+                self.backend.values[id] = self.backend.values[resolved];
 
                 Ok(())
             }
@@ -1154,7 +1152,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.builder
                     .append_ebb_params_for_function_params(cont_block);
 
-                let current_params = self.builder.ebb_params(self.current_block).to_vec().clone();
+                let current_params = self.builder.ebb_params(self.current_block).to_owned();
 
                 self.builder.ins().brnz(cond, true_block, &current_params);
                 self.builder.ins().jump(false_block, &current_params);
@@ -1168,8 +1166,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         self.compile_id(stmt)?;
                     }
 
-                    let current_params =
-                        self.builder.ebb_params(self.current_block).to_vec().clone();
+                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
                     self.builder.ins().jump(cont_block, &current_params);
                 }
 
@@ -1182,8 +1179,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         self.compile_id(stmt)?;
                     }
 
-                    let current_params =
-                        self.builder.ebb_params(self.current_block).to_vec().clone();
+                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
                     self.builder.ins().jump(cont_block, &current_params);
                 }
 
@@ -1304,40 +1300,37 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 };
 
                 // field access on a string
-                match &self.backend.semantic.types[unpointered_ty] {
-                    Type::String => {
-                        let field_name = String::from(
-                            self.backend
-                                .semantic
-                                .parser
-                                .resolve_sym_unchecked(field_name),
+                if self.backend.semantic.types[unpointered_ty] == Type::String {
+                    let field_name = String::from(
+                        self.backend
+                            .semantic
+                            .parser
+                            .resolve_sym_unchecked(field_name),
+                    );
+
+                    let mut base = self.as_value(base);
+
+                    if loaded {
+                        // if we are doing field access through a pointer, do an extra load
+                        base = self.builder.ins().load(
+                            self.module.isa().pointer_type(),
+                            MemFlags::new(),
+                            base,
+                            0,
                         );
-
-                        let mut base = self.as_value(base);
-
-                        if loaded {
-                            // if we are doing field access through a pointer, do an extra load
-                            base = self.builder.ins().load(
-                                self.module.isa().pointer_type(),
-                                MemFlags::new(),
-                                base,
-                                0,
-                            );
-                        }
-
-                        match field_name.as_str() {
-                            "len" => (),
-                            "buf" => {
-                                let offset = self.builder.ins().iconst(types::I64, 8);
-                                base = self.builder.ins().iadd(base, offset);
-                            }
-                            _ => unreachable!(),
-                        }
-
-                        self.backend.values[id] = base.into();
-                        return Ok(());
                     }
-                    _ => (),
+
+                    match field_name.as_str() {
+                        "len" => (),
+                        "buf" => {
+                            let offset = self.builder.ins().iconst(types::I64, 8);
+                            base = self.builder.ins().iadd(base, offset);
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    self.backend.values[id] = base.into();
+                    return Ok(());
                 }
 
                 // all field accesses on enums have the same offset -- just the tag size in bytes
@@ -1606,7 +1599,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         }
     }
 
-    fn compile_call(&mut self, id: Id, name: Id, params: &Vec<Id>) -> Result<(), CompileError> {
+    fn compile_call(&mut self, id: Id, name: Id, params: &[Id]) -> Result<(), CompileError> {
         // todo(chad): This doesn't need to be dynamic (call and then call-indirect) when compiling straight to an object file
 
         self.compile_id(name)?;
@@ -1706,7 +1699,7 @@ pub fn into_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, C
         },
         Type::Func { .. } => Ok(types::I64),
         Type::Pointer(_) => Ok(types::I64), // todo(chad): need to get the actual type here, from the isa
-        Type::Struct { params, .. } if semantic.parser.id_vec(*params).len() == 0 => unreachable!(),
+        Type::Struct { params, .. } if semantic.parser.id_vec(*params).is_empty() => unreachable!(),
         Type::Tokens => Ok(types::I64), // just the index into token_vecs
         _ => Err(CompileError::from_string(
             format!("Could not convert type {:?}", ty),

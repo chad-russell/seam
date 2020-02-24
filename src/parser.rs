@@ -283,10 +283,10 @@ impl<'a> Lexer<'a> {
             .source
             .chars()
             .position(|c| c == '\n')
-            .unwrap_or(self.source.len());
+            .unwrap_or_else(|| self.source.len());
         self.eat(chars);
 
-        if self.source.len() > 0 {
+        if !self.source.is_empty() {
             self.newline();
         }
     }
@@ -334,7 +334,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn prefix_keyword(&mut self, pat: &str, tok: Token) -> bool {
-        if self.source.len() >= pat.len() + 1
+        if self.source.len() > pat.len()
             && self.source.starts_with(pat)
             && is_special(self.source.chars().skip(pat.len()).take(1).next().unwrap())
         {
@@ -355,7 +355,7 @@ impl<'a> Lexer<'a> {
             self.second = macro_tokens
                 .first()
                 .cloned()
-                .unwrap_or(Lexeme::new(Token::EOF, Range::default()));
+                .unwrap_or_else(|| Lexeme::new(Token::EOF, Range::default()));
 
             if !macro_tokens.is_empty() {
                 macro_tokens.remove(0);
@@ -368,7 +368,7 @@ impl<'a> Lexer<'a> {
 
         let start = self.loc;
 
-        self.top = self.second.clone();
+        self.top = self.second;
 
         // check_keywords(
         //     "---" => Token::Uninit,
@@ -798,7 +798,7 @@ impl TryInto<Type> for Node {
 
     fn try_into(self) -> Result<Type, Self::Error> {
         match self {
-            Node::TypeLiteral(basic_type) => Ok(basic_type.into()),
+            Node::TypeLiteral(basic_type) => Ok(basic_type),
             _ => Err(String::from("Expected type")),
         }
     }
@@ -840,7 +840,7 @@ impl<'a> Parser<'a> {
             node_scopes: Default::default(),
             ranges: Default::default(),
             node_is_addressable: Default::default(),
-            scopes: scopes,
+            scopes,
             top_scope: 0,
             function_scopes: vec![0],
             unquote_scope: 0,
@@ -884,7 +884,7 @@ impl<'a> Parser<'a> {
     #[allow(dead_code)]
     pub fn get_top_level(&self, name: impl Into<String>) -> Option<Id> {
         let sym = self.lexer.string_interner.get(name.into()).unwrap();
-        self.top_level_map.get(&sym).map(|x| *x)
+        self.top_level_map.get(&sym).copied()
     }
 
     pub fn scope_insert(&mut self, sym: Sym, id: Id) {
@@ -896,7 +896,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn scope_get_with_scope_id(&self, sym: Sym, scope: Id) -> Option<Id> {
-        match self.scopes[scope].entries.get(&sym).map(|x| *x) {
+        match self.scopes[scope].entries.get(&sym).copied() {
             Some(id) => Some(id),
             None => match self.scopes[scope].parent {
                 Some(parent) => self.scope_get_with_scope_id(sym, parent),
@@ -942,12 +942,9 @@ impl<'a> Parser<'a> {
     #[inline]
     fn parse_sym(&mut self) -> Result<Sym, CompileError> {
         let ident = self.parse_symbol()?;
-        self.nodes[ident]
-            .as_symbol()
-            .ok_or(CompileError::from_string(
-                String::from("Expected a symbol"),
-                self.lexer.top.range,
-            ))
+        self.nodes[ident].as_symbol().ok_or_else(|| {
+            CompileError::from_string(String::from("Expected a symbol"), self.lexer.top.range)
+        })
     }
 
     fn parse_type(&mut self) -> Result<Id, CompileError> {
@@ -1172,7 +1169,7 @@ impl<'a> Parser<'a> {
     // }
 
     pub fn parse_expression(&mut self) -> Result<Id, CompileError> {
-        match self.lexer.top.tok.clone() {
+        match self.lexer.top.tok {
             Token::IntegerLiteral(_) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
             Token::StringLiteral(sym) => {
                 let range = self.lexer.top.range;
@@ -1359,7 +1356,7 @@ impl<'a> Parser<'a> {
                         self.macro_calls.push(value);
                         self.macro_calls_by_function
                             .entry(cur_fun)
-                            .or_insert(Vec::new())
+                            .or_default()
                             .push(value);
                         self.function_by_macro_call.insert(value, cur_fun);
                     } else if self.lexer.top.tok == Token::LCurly {

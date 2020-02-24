@@ -180,10 +180,7 @@ impl<'a> Semantic<'a> {
                 };
 
                 if is_load {
-                    match &mut self.parser.nodes[id] {
-                        Node::Set { is_store, .. } => *is_store = true,
-                        _ => {}
-                    }
+                    if let Node::Set { is_store, .. } = &mut self.parser.nodes[id] { *is_store = true; }
                 }
 
                 Ok(())
@@ -227,32 +224,29 @@ impl<'a> Semantic<'a> {
                     }
                 }
 
-                match &self.types[unpointered_ty] {
-                    Type::String => {
-                        let field_name = self.parser.resolve_sym_unchecked(field_name);
-                        match field_name {
-                            "len" => {
-                                self.types[id] = Type::Basic(BasicType::I64);
-                            }
-                            "buf" => {
-                                // todo(chad): maybe make StringPointer its own type or something?
-                                // or have Ids that will always reference basic types
-                                self.types[id] = Type::Type;
-                            }
-                            _ => {
-                                return Err(CompileError::from_string(
-                                    "Valid fields on strings are 'len' or 'buf'",
-                                    self.parser.ranges[id],
-                                ))
-                            }
+                if self.types[unpointered_ty] == Type::String {
+                    let field_name = self.parser.resolve_sym_unchecked(field_name);
+                    match field_name {
+                        "len" => {
+                            self.types[id] = Type::Basic(BasicType::I64);
                         }
-
-                        return Ok(());
+                        "buf" => {
+                            // todo(chad): maybe make StringPointer its own type or something?
+                            // or have Ids that will always reference basic types
+                            self.types[id] = Type::Type;
+                        }
+                        _ => {
+                            return Err(CompileError::from_string(
+                                "Valid fields on strings are 'len' or 'buf'",
+                                self.parser.ranges[id],
+                            ))
+                        }
                     }
-                    _ => (),
+
+                    return Ok(());
                 }
 
-                let params = self.types[unpointered_ty].as_struct_params().ok_or(
+                let params = self.types[unpointered_ty].as_struct_params().ok_or_else(||
                     CompileError::from_string(
                         format!(
                             "Expected struct or enum, got {:?} for node {}",
@@ -415,8 +409,8 @@ impl<'a> Semantic<'a> {
                 }
 
                 self.types[id] = Type::Func {
-                    return_ty: return_ty,
-                    input_tys: params.clone(),
+                    return_ty,
+                    input_tys: params,
                     copied_from: None,
                 };
 
@@ -518,11 +512,11 @@ impl<'a> Semantic<'a> {
 
                 match ty {
                     Type::Basic(_) => {
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Pointer(pointer_ty) => {
                         self.assign_type(pointer_ty)?;
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::String => {
                         self.types[id] = Type::String;
@@ -540,33 +534,33 @@ impl<'a> Semantic<'a> {
                             self.assign_type(input_ty)?;
                         }
 
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Struct { params, .. } => {
                         for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty)?;
                         }
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::StructLiteral(params) => {
                         for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty)?;
                         }
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Enum { params, .. } => {
                         for ty in self.parser.id_vec(params).clone() {
                             self.assign_type(ty)?;
                         }
 
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Array(array_ty) => {
                         self.assign_type(array_ty)?;
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Tokens => {
-                        self.types[id] = ty.clone();
+                        self.types[id] = ty;
                     }
                     Type::Unassigned => unreachable!(),
                 }
@@ -652,14 +646,14 @@ impl<'a> Semantic<'a> {
                     // match given ct_params against declared ct_params
                     let given = ct_params
                         .map(|p| self.parser.id_vec(p).clone())
-                        .unwrap_or(Vec::new());
+                        .unwrap_or_default();
                     let decl_id_vec = *match &self.parser.nodes[resolved_func] {
                         Node::Func { ct_params, .. } => ct_params,
                         _ => unreachable!(),
                     };
                     let decl = decl_id_vec
                         .map(|p| self.parser.id_vec(p).clone())
-                        .unwrap_or(Vec::new());
+                        .unwrap_or_default();
 
                     for (index, (g, d)) in given.iter().zip(decl.iter()).enumerate() {
                         self.assign_type(*d)?;
@@ -698,9 +692,8 @@ impl<'a> Semantic<'a> {
                 self.unify_types()?;
 
                 self.assign_type(name)?;
-                match self.types[name] {
-                    Type::Func { return_ty, .. } => self.match_types(id, return_ty)?,
-                    _ => (),
+                if let Type::Func { return_ty, .. } = self.types[name] {
+                    self.match_types(id, return_ty)?;
                 }
 
                 Ok(())
@@ -733,7 +726,7 @@ impl<'a> Semantic<'a> {
                     }
                 } else {
                     self.types[id] = Type::Struct {
-                        params: params,
+                        params,
                         copied_from: None,
                     };
 
@@ -788,7 +781,7 @@ impl<'a> Semantic<'a> {
                     }
                 } else {
                     self.types[id] = Type::Enum {
-                        params: params,
+                        params,
                         copied_from: None,
                     };
 
@@ -1206,8 +1199,8 @@ impl<'a> Semantic<'a> {
 
                 for id in self.type_matches[uid].clone() {
                     // if setting a struct literal to a struct/enum, do more matching on the fields
-                    match self.types[id] {
-                        Type::StructLiteral(lit_params) => match self.types[ty as usize] {
+                    if let Type::StructLiteral(lit_params) = self.types[id] {
+                        match self.types[ty as usize] {
                             Type::Struct { params, .. } => {
                                 // todo(chad): make this a method
                                 // todo(chad): check they have the same number of arguments
@@ -1222,8 +1215,7 @@ impl<'a> Semantic<'a> {
                                 future_enum_matches.push((lit_params, params));
                             }
                             _ => unreachable!(),
-                        },
-                        _ => (),
+                        }
                     }
 
                     self.types[id] = self.types[ty as usize];
