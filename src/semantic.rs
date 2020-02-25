@@ -362,39 +362,14 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            // Node::Add(arg1, arg2)
-            // | Node::Sub(arg1, arg2)
-            // | Node::Mul(arg1, arg2)
-            // | Node::Div(arg1, arg2) => {
-            //     self.assign_type(*arg1, coercion)?;
-            //     self.assign_type(*arg2, coercion.or_id(*arg1))?;
+            Node::Add(lhs, rhs) | Node::Sub(lhs, rhs) | Node::Mul(lhs, rhs) | Node::Div(lhs, rhs) => {
+                self.assign_type(lhs)?;
+                self.assign_type(rhs)?;
+                self.match_types(lhs, rhs)?;
+                self.match_types(id, lhs)?;
 
-            //     self.match_types(*arg1, *arg2);
-            //     self.match_types(id, *arg1);
-
-            //     Ok(())
-            // }
-            // Node::LessThan(arg1, arg2)
-            // | Node::GreaterThan(arg1, arg2)
-            // | Node::EqualTo(arg1, arg2) => {
-            //     self.assign_type(*arg1, coercion)?;
-            //     self.assign_type(*arg2, coercion.or_id(*arg1))?;
-
-            //     self.match_types(*arg1, *arg2);
-            //     self.match_types(id, *arg1);
-
-            //     Ok(())
-            // }
-            // Node::And(arg1, arg2) | Node::Or(arg1, arg2) => {
-            //     self.assign_type(*arg1, coercion)?;
-            //     self.assign_type(*arg2, coercion.or_id(*arg1))?;
-
-            //     Ok(())
-            // }
-            // Node::Not(arg1) => {
-            //     self.assign_type(*arg1, Coercion::Basic(BasicType::Bool))?;
-            //     Ok(())
-            // }
+                Ok(())
+            }
             Node::Func {
                 name: _,     // Sym,
                 scope: _,    // Id,

@@ -440,7 +440,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 fb.builder.seal_all_blocks();
                 fb.builder.finalize();
 
-                println!("{}", ctx.func.display(None));
+                // println!("{}", ctx.func.display(None));
 
                 module.define_function(func, &mut ctx).unwrap();
                 module.clear_context(&mut ctx);
@@ -988,18 +988,58 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 // todo(chad): store if necessary
                 Ok(())
             }
-            // Node::Add(lhs, rhs) => {
-            //     self.compile_id(*lhs)?;
-            //     self.compile_id(*rhs)?;
+            Node::Add(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
 
-            //     let lhs = self.rvalue(*lhs);
-            //     let rhs = self.rvalue(*rhs);
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
 
-            //     let value = self.builder.ins().iadd(lhs, rhs);
-            //     self.set_value(id, value);
+                let value = self.builder.ins().iadd(lhs, rhs);
+                self.set_value(id, value);
 
-            //     Ok(())
-            // }
+                // todo(chad): store if necessary
+                Ok(())
+            }
+            Node::Sub(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                let value = self.builder.ins().isub(lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
+            Node::Mul(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                let value = self.builder.ins().imul(lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
+            Node::Div(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                let value = self.builder.ins().sdiv(lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
             Node::Let {
                 name: _, // Sym
                 ty: _,   // Id
@@ -1581,8 +1621,6 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let tag = self.builder.ins().iconst(types::I16, tag);
         self.builder.ins().store(MemFlags::new(), tag, dest_addr, 0);
 
-        let mut offset = ENUM_TAG_SIZE_BYTES;
-
         // store the data
         match ty {
             Type::Pointer(_) => todo!("pointer data"),
@@ -1614,7 +1652,12 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.builder.ins().store(MemFlags::new(), len, array_ptr, 0);
 
                 // allocate array data ptr
-                let size_of_ty = type_size(&self.backend.semantic, &self.module, id);
+                let size_of_ty = type_size(
+                    &self.backend.semantic,
+                    &self.module,
+                    self.backend.semantic.parser.ty_decl.unwrap(),
+                );
+                dbg!(size_of_ty);
                 let size_of_struct = size_of_ty + 16; // 16 for `name: string` param
                 let array_data_ptr = self.declare_global_data_with_size(
                     &format!("{}_typeof_struct_array_data", id),
@@ -1651,16 +1694,16 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     // store ty
                     // todo(chad): need a parameter on `get_global_ptr_to_type_of` that can store into a ptr instead of always allocating global space
                     let ty_ptr = self.get_global_ptr_to_type_of(ty);
-                    let dest_value = self.builder.ins().iadd_imm(array_data_ptr, offset as i64);
+                    let ty_dest_value = self.builder.ins().iadd_imm(array_data_ptr, offset as i64);
                     self.builder.emit_small_memcpy(
                         self.module.isa().frontend_config(),
-                        dest_value,
+                        ty_dest_value,
                         ty_ptr,
                         size_of_ty as _,
                         1,
                         1,
                     );
-                    offset += 8;
+                    offset += size_of_ty as i32;
                 }
 
                 // store array into dest_addr
@@ -1673,8 +1716,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     dest_addr,
                     array_ptr,
                     16,
-                    8,
-                    8,
+                    1,
+                    1,
                 );
 
                 // let d = self.builder.ins().iconst(types::I64, 123);

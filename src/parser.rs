@@ -155,6 +155,10 @@ pub enum Token {
     Dot,
     Asterisk,
     EqEq,
+    Add,
+    Sub,
+    Mul,
+    Div,
     Eq,
     Comma,
     Struct,
@@ -518,6 +522,18 @@ impl<'a> Lexer<'a> {
         if self.prefix("=", Token::Eq) {
             return;
         }
+        if self.prefix("+", Token::Add) {
+            return;
+        }
+        if self.prefix("-", Token::Sub) {
+            return;
+        }
+        if self.prefix("*", Token::Mul) {
+            return;
+        }
+        if self.prefix("/", Token::Div) {
+            return;
+        }
 
         self.second = match self.source.chars().next() {
             Some('"') => {
@@ -801,10 +817,10 @@ pub enum Node {
     TypeOf(Id),
     Cast(Id),
     EqEq(Id, Id),
-    // Add(Id, Id),
-    // Sub(Id, Id),
-    // Mul(Id, Id),
-    // Div(Id, Id),
+    Add(Id, Id),
+    Sub(Id, Id),
+    Mul(Id, Id),
+    Div(Id, Id),
     // LessThan(Id, Id),
     // GreaterThan(Id, Id),
     // EqualTo(Id, Id),
@@ -1203,7 +1219,7 @@ impl<'a> Parser<'a> {
 
         loop {
             match self.lexer.top.tok {
-                Token::EqEq => {
+                Token::EqEq | Token::Add | Token::Sub | Token::Mul | Token::Div => {
                     if !parsing_op {
                         break;
                     }
@@ -1265,6 +1281,38 @@ impl<'a> Parser<'a> {
                 let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
 
                 Ok(self.push_node(range, Node::EqEq(lhs, rhs)))
+            }
+            Shunting::Operator(Token::Add) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::Add(lhs, rhs)))
+            }
+            Shunting::Operator(Token::Sub) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::Sub(lhs, rhs)))
+            }
+            Shunting::Operator(Token::Mul) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::Mul(lhs, rhs)))
+            }
+            Shunting::Operator(Token::Div) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::Div(lhs, rhs)))
             }
             Shunting::Id(id) => Err(CompileError::from_string(
                 "Could not parse operator",
