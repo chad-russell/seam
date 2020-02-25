@@ -821,8 +821,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 _ => into_cranelift_type(&self.backend, id).unwrap(),
             };
 
-            match &self.backend.values[id] {
-                Value::Value(v) => self.builder.ins().load(ty, MemFlags::new(), *v, 0),
+            match self.backend.values[id] {
+                Value::Value(v) => self.load(ty, v, 0),
                 _ => panic!(
                     "Could not get cranelift value: {:?}",
                     &self.backend.values[id]
@@ -1084,12 +1084,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     let mut addr = self.backend.values[name].clone().as_value_relaxed(self);
                     if self.backend.rvalue_is_ptr(name) {
-                        addr = self.builder.ins().load(
-                            self.module.isa().pointer_type(),
-                            MemFlags::new(),
-                            addr,
-                            0,
-                        );
+                        addr = self.load(self.module.isa().pointer_type(), addr, 0);
                     }
 
                     self.store(expr, &Value::Value(addr));
@@ -1217,7 +1212,11 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     _ => into_cranelift_type(&self.backend, id)?,
                 };
 
-                let loaded = self.builder.ins().load(ty, MemFlags::new(), value, 0);
+                let loaded = if self.backend.rvalue_is_ptr(load_id) {
+                    self.load(types::I64, value, 0)
+                } else {
+                    self.load(ty, value, 0)
+                };
 
                 self.set_value(id, loaded);
 
@@ -1300,12 +1299,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     if loaded {
                         // if we are doing field access through a pointer, do an extra load
-                        base = self.builder.ins().load(
-                            self.module.isa().pointer_type(),
-                            MemFlags::new(),
-                            base,
-                            0,
-                        );
+                        base = self.load(self.module.isa().pointer_type(), base, 0);
                     }
 
                     match field_name.as_str() {
@@ -1355,12 +1349,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 if loaded {
                     // if we are doing field access through a pointer, do an extra load
-                    base = self.builder.ins().load(
-                        self.module.isa().pointer_type(),
-                        MemFlags::new(),
-                        base,
-                        0,
-                    );
+                    base = self.load(self.module.isa().pointer_type(), base, 0);
                 }
 
                 if is_enum && is_assignment {
@@ -1507,12 +1496,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.compile_id(index)?;
 
                 let struct_ptr = self.backend.values[arr].as_addr().as_value_relaxed(self);
-                let data_ptr = self.builder.ins().load(
-                    self.module.isa().pointer_type(),
-                    MemFlags::new(),
-                    struct_ptr,
-                    8,
-                );
+                let data_ptr = self.load(self.module.isa().pointer_type(), struct_ptr, 8);
 
                 let element_size = type_size(&self.backend.semantic, &self.module, id);
                 let element_size = self.builder.ins().iconst(types::I64, element_size as i64);
@@ -1657,7 +1641,6 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     &self.module,
                     self.backend.semantic.parser.ty_decl.unwrap(),
                 );
-                dbg!(size_of_ty);
                 let size_of_struct = size_of_ty + 16; // 16 for `name: string` param
                 let array_data_ptr = self.declare_global_data_with_size(
                     &format!("{}_typeof_struct_array_data", id),
@@ -1809,12 +1792,17 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
         Ok(())
     }
+
+    fn load(&mut self, ty: types::Type, value: CraneliftValue, offset: i32) -> CraneliftValue {
+        // dbg!(ty);
+        self.builder.ins().load(ty, MemFlags::new(), value, offset)
+    }
 }
 
 pub fn into_cranelift_type(backend: &Backend, id: Id) -> Result<types::Type, CompileError> {
-    if backend.rvalue_is_ptr(id) {
-        return Ok(types::I64); // todo(chad): isa ptr type
-    }
+    // if backend.rvalue_is_ptr(id) {
+    //     return Ok(types::I64); // todo(chad): isa ptr type
+    // }
 
     let range = backend.semantic.parser.ranges[id];
     let ty = &backend.semantic.types[id];
