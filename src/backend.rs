@@ -170,6 +170,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.semantic.assign_type(t)?;
             }
             self.semantic.unify_types()?;
+            self.allocate_for_new_nodes();
             for t in self.semantic.topo.clone() {
                 self.compile_id(t)?;
             }
@@ -522,6 +523,7 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 
     pub fn allocate_for_new_nodes(&mut self) {
+        self.semantic.allocate_for_new_nodes();
         while self.values.len() < self.semantic.parser.nodes.len() {
             self.values.push(Value::Unassigned);
         }
@@ -1534,24 +1536,34 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         }
     }
 
-    fn declare_global_data_with_size(&mut self, name: &str, bytes: u32) -> CraneliftValue {
-        let data_id = self
-            .module
-            .declare_data(name, Linkage::Local, true, None)
-            .unwrap();
+    fn declare_global_data_with_size(&mut self, _name: &str, bytes: u32) -> CraneliftValue {
+        // let data_id = self
+        //     .module
+        //     .declare_data(name, Linkage::Local, true, None)
+        //     .unwrap();
 
-        let mut data_ctx = DataContext::new();
-        data_ctx.define(vec![0u8; bytes as usize].into_boxed_slice());
+        // let mut data_ctx = DataContext::new();
+        // data_ctx.define_zeroinit(bytes as usize);
 
-        self.module.define_data(data_id, &data_ctx).unwrap();
+        // self.module.define_data(data_id, &data_ctx).unwrap();
 
-        let ptr = self
-            .module
-            .declare_data_in_func(data_id, &mut self.builder.func);
+        // let ptr = self
+        //     .module
+        //     .declare_data_in_func(data_id, &mut self.builder.func);
 
+        // self.builder
+        //     .ins()
+        //     .symbol_value(self.module.isa().pointer_type(), ptr)
+
+        // HACK
+        let slot = self.builder.create_stack_slot(StackSlotData {
+            kind: StackSlotKind::ExplicitSlot,
+            size: bytes,
+            offset: None,
+        });
         self.builder
             .ins()
-            .global_value(self.module.isa().pointer_type(), ptr)
+            .stack_addr(self.module.isa().pointer_type(), slot, 0)
     }
 
     fn declare_global_data_with_bytes(&mut self, name: &str, bytes: Box<[u8]>) -> CraneliftValue {
@@ -1565,13 +1577,16 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
         self.module.define_data(data_id, &data_ctx).unwrap();
 
+        self.module.finalize_definitions();
+        self.module.get_finalized_data(data_id);
+
         let ptr = self
             .module
             .declare_data_in_func(data_id, &mut self.builder.func);
 
         self.builder
             .ins()
-            .global_value(self.module.isa().pointer_type(), ptr)
+            .symbol_value(self.module.isa().pointer_type(), ptr)
     }
 
     fn get_global_ptr_to_type_of(&mut self, id: Id) -> CraneliftValue {
