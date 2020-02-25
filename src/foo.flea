@@ -5,13 +5,13 @@ fn print_str(s: *string) i64 {
     return 0;
 }
 
-macro mac_id(t: Tokens) Tokens {
-    return t;
-}
-
-mac_id! {
-    extern print_i64(i: i64) i64;
-}
+// extern print_i8(i: i8) i64;
+                    // self.builder
+                    //     .ins()
+                    //     .store(MemFlags::new(), ty_ptr, data_ptr, offset);
+// extern print_i16(i: i16) i64;
+// extern print_i32(i: i32) i64;
+// extern print_i64(i: i64) i64;
 
 // enum Token {
 //     LParen: struct{},
@@ -52,6 +52,7 @@ mac_id! {
 
 enum Ty {
     I8: struct{},
+    I16: struct{},
     I32: struct{},
     I64: struct{},
     F32: struct{},
@@ -71,6 +72,7 @@ enum Ty {
         input_types: []Ty,
         return_type: *Ty,
     },
+    HackI64: i64,
 }
 
 fn main() i64 {
@@ -102,59 +104,78 @@ fn main() i64 {
 
     // return old_tests();
 
-    let n: i64 = 18;
-    println(&n);
-    println(&"hello");
+    // let n64: i64 = 18;
+    // println(&n64);
 
-    return 0;
+    // let n32: i32 = 12;
+    // println(&n32);
+    
+    // println(&"testing...");
+
+    // let st: *struct{a: i64, b: i32} = &{a: n64, b: n32};
+    // println(st);
+
+    let s: struct { val: i64 } = { val: 12 };
+    let t: Ty = #type_of(s);
+
+    let casted_tag: *struct { tag: i64 } = #cast &t.Struct[0].type;
+    // let casted_array: *struct { len: i64 } = #cast &(t.Struct);
+    // print_str(&t.Struct[0].name);
+
+    return casted_tag.tag;
 }
 
-fn println<T: Type>(val: *T) i64 {
-    let t: Ty = #type_of(^val);
+// fn println<T: Type>(val: *T) i64 {
+//     let v = val;
+//     let t: Ty = #type_of(^v);
 
-    let casted_type: *struct { tag: i64 } = #cast &t;
-    let tag = casted_type.tag;
+//     let casted_type: *struct { tag: i64 } = #cast &t;
+//     let tag = casted_type.tag;
 
-    if tag == 0 {
-        print_str(&"I8");
-    }
-    if tag == 1 {
-        print_str(&"I16");
-    }
-    if tag == 2 {
-        print_str(&"I32");
-    }
-    if tag == 3 {
-        let casted: *i64 = #cast val;
-        print_i64(^casted);
-    }
-    if tag == 4 {
-        print_str(&"F32");
-    }
-    if tag == 5 {
-        print_str(&"F64");
-    }
-    if tag == 6 {
-        print_str(&"String");
-    }
-    if tag == 7 {
-        print_str(&"Pointer");
-    }
-    if tag == 8 {
-        print_str(&"Array");
-    }
-    if tag == 9 {
-        print_str(&"Struct");
-    }
-    if tag == 10 {
-        print_str(&"Enum");
-    }
-    if tag == 11 {
-        print_str(&"Func");
-    }
+//     if tag == 0 {
+//         // let casted_i8: *i8 = #cast v;
+//         // print_i8(^casted_i8);
+//     }
+//     if tag == 1 {
+//         // let casted_i16: *i16 = #cast v;
+//         // print_i16(^casted_i16);
+//     }
+//     if tag == 2 {
+//         let casted_i32: *i32 = #cast val;
+//         print_i32(^casted_i32);
+//     }
+//     if tag == 3 {
+//         let casted_i64: *i64 = #cast v;
+//         print_i64(^casted_i64);
+//     }
+//     if tag == 4 {
+//         print_str(&"F32");
+//     }
+//     if tag == 5 {
+//         print_str(&"F64");
+//     }
+//     if tag == 6 {
+//         let casted_string: *string = #cast v;
+//         print_str(casted_string);
+//     }
+//     if tag == 7 {
+//         print_str(&"Pointer");
+//     }
+//     if tag == 8 {
+//         print_str(&"Array");
+//     }
+//     if tag == 9 {
+//         print_str(&"Struct");
+//     }
+//     if tag == 10 {
+//         print_str(&"Enum");
+//     }
+//     if tag == 11 {
+//         print_str(&"Func");
+//     }
 
-    return tag;
-}
+//     return tag;
+// }
 
 // fn ct<p: struct{val: T}, T: Type>() i64 {
 //     print_int(p.val);

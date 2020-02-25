@@ -114,6 +114,13 @@ impl Type {
         }
     }
 
+    pub fn is_basic(&self) -> bool {
+        match self {
+            Type::Basic(_) => true,
+            _ => false,
+        }
+    }
+
     // pub fn is_coercble(&self) -> bool {
     //     if self.is_concrete() {
     //         return true;
