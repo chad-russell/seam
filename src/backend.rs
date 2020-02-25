@@ -83,6 +83,8 @@ impl Value {
 
 pub struct Backend<'a, 'b> {
     pub semantic: &'a mut Semantic<'b>,
+    pub module: Module<SimpleJITBackend>,
+    pub string_literal_data_ids: BTreeMap<Sym, DataId>,
     pub values: Vec<Value>,
     pub funcs: BTreeMap<Sym, FuncId>,
     pub func_sigs: BTreeMap<Sym, Signature>,
@@ -92,8 +94,27 @@ impl<'a, 'b> Backend<'a, 'b> {
     pub fn new(semantic: &'a mut Semantic<'b>) -> Self {
         let len = semantic.types.len();
 
+        let mut module: Module<SimpleJITBackend> = {
+            let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
+            jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
+            jit_builder.symbol("print_i8", print_i8 as *const u8);
+            jit_builder.symbol("print_i16", print_i16 as *const u8);
+            jit_builder.symbol("print_i32", print_i32 as *const u8);
+            jit_builder.symbol("print_i64", print_i64 as *const u8);
+            jit_builder.symbol("print_string", print_string as *const u8);
+            // for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
+            //     jit_builder.symbol(self.resolve_symbol(name), ptr.0);
+            // }
+
+            Module::new(jit_builder)
+        };
+
+        let string_literal_data_ids = get_string_literal_data_ids(semantic, &mut module);
+
         Self {
             semantic,
+            module,
+            string_literal_data_ids,
             values: vec![Value::Unassigned; len],
             funcs: BTreeMap::new(),
             func_sigs: BTreeMap::new(),
@@ -339,35 +360,17 @@ impl<'a, 'b> Backend<'a, 'b> {
                 is_macro,
                 ..
             } => {
-                // todo(chad): find a way to reuse these
-                let mut module: Module<SimpleJITBackend> = {
-                    let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
-                    jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-                    jit_builder.symbol("print_i8", print_i8 as *const u8);
-                    jit_builder.symbol("print_i16", print_i16 as *const u8);
-                    jit_builder.symbol("print_i32", print_i32 as *const u8);
-                    jit_builder.symbol("print_i64", print_i64 as *const u8);
-                    jit_builder.symbol("print_string", print_string as *const u8);
-                    for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
-                        jit_builder.symbol(self.resolve_symbol(name), ptr.0);
-                    }
-
-                    Module::new(jit_builder)
-                };
-
-                let string_literal_data_ids = self.get_string_literal_data_ids(&mut module);
-
                 self.funcs.clear();
                 for (name, sig) in self.func_sigs.iter() {
                     self.funcs.insert(
                         name.clone(),
-                        module
+                        self.module
                             .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
                             .unwrap(),
                     );
                 }
 
-                let mut ctx = module.make_context();
+                let mut ctx = self.module.make_context();
 
                 let func_name = String::from(self.semantic.parser.resolve_sym_unchecked(name));
                 let func_sym = self.get_symbol(func_name.clone());
@@ -376,7 +379,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 // println!("compiling func {}", func_name);
 
-                let mut sig = module.make_signature();
+                let mut sig = self.module.make_signature();
 
                 for param in self.semantic.parser.id_vec(params) {
                     sig.params
@@ -387,7 +390,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     sig.params.push(AbiParam::new(types::I64));
                 }
 
-                let return_size = type_size(&self.semantic, &module, return_ty);
+                let return_size = type_size(&self.semantic, &self.module, return_ty);
                 if return_size > 0 {
                     sig.returns
                         .push(AbiParam::new(into_cranelift_type(&self, return_ty)?));
@@ -397,7 +400,8 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 self.func_sigs.insert(func_sym, ctx.func.signature.clone());
 
-                let func = module
+                let func = self
+                    .module
                     .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
                     .unwrap();
                 ctx.func.name = ExternalName::user(0, func.as_u32());
@@ -409,29 +413,29 @@ impl<'a, 'b> Backend<'a, 'b> {
                 builder.append_ebb_params_for_function_params(ebb);
 
                 let dfp_decl = {
-                    let mut dfp_sig = module.make_signature();
+                    let mut dfp_sig = self.module.make_signature();
 
                     dfp_sig.params.push(AbiParam::new(types::I64));
                     dfp_sig
                         .returns
-                        .push(AbiParam::new(module.isa().pointer_type()));
+                        .push(AbiParam::new(self.module.isa().pointer_type()));
 
-                    let dfp_func_id = module
+                    let dfp_func_id = self
+                        .module
                         .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
                         .unwrap();
 
-                    module.declare_func_in_func(dfp_func_id, &mut builder.func)
+                    self.module
+                        .declare_func_in_func(dfp_func_id, &mut builder.func)
                 };
 
-                declare_externs(self, &mut module, &mut builder)?;
+                declare_externs(self, &mut builder)?;
 
                 let mut fb = FunctionBackend {
                     backend: self,
                     builder,
                     current_block: ebb,
-                    string_literal_data_ids,
                     dynamic_fn_ptr_decl: dfp_decl,
-                    module: &mut module,
                 };
 
                 for stmt in fb.backend.semantic.parser.id_vec(stmts).clone() {
@@ -443,12 +447,12 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 // println!("{}", ctx.func.display(None));
 
-                module.define_function(func, &mut ctx).unwrap();
-                module.clear_context(&mut ctx);
+                self.module.define_function(func, &mut ctx).unwrap();
+                self.module.clear_context(&mut ctx);
 
-                module.finalize_definitions();
+                self.module.finalize_definitions();
 
-                let func = module.get_finalized_function(func);
+                let func = self.module.get_finalized_function(func);
                 FUNC_PTRS.lock().unwrap().insert(func_sym, FuncPtr(func));
 
                 Ok(())
@@ -539,39 +543,23 @@ impl<'a, 'b> Backend<'a, 'b> {
         //     self.resolve_symbol(hoisting_name)
         // );
 
-        let mut module: Module<SimpleJITBackend> = {
-            let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
-            jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-            jit_builder.symbol("print_i8", print_i8 as *const u8);
-            jit_builder.symbol("print_i16", print_i16 as *const u8);
-            jit_builder.symbol("print_i32", print_i32 as *const u8);
-            jit_builder.symbol("print_i64", print_i64 as *const u8);
-            jit_builder.symbol("print_string", print_string as *const u8);
-            for (&name, &ptr) in crate::backend::FUNC_PTRS.lock().unwrap().iter() {
-                jit_builder.symbol(self.resolve_symbol(name), ptr.0);
-            }
-
-            Module::new(jit_builder)
-        };
-
-        let string_literal_data_ids = self.get_string_literal_data_ids(&mut module);
-
         self.funcs.clear();
         for (name, sig) in self.func_sigs.iter() {
             self.funcs.insert(
                 name.clone(),
-                module
+                self.module
                     .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
                     .unwrap(),
             );
         }
 
-        let mut ctx = module.make_context();
-        let mut sig = module.make_signature();
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
 
         // param 0 = ptr to semantic
         // todo(chad): eventually param 1 = ptr to return value
-        sig.params.push(AbiParam::new(module.isa().pointer_type()));
+        sig.params
+            .push(AbiParam::new(self.module.isa().pointer_type()));
         sig.returns.push(AbiParam::new(types::I64));
 
         ctx.func.signature = sig;
@@ -580,117 +568,85 @@ impl<'a, 'b> Backend<'a, 'b> {
         //     .func_sigs
         //     .insert(func_sym, ctx.func.signature.clone());
 
-        let func = module
+        let func = self
+            .module
             .declare_function("hoist", Linkage::Local, &ctx.func.signature)
             .unwrap();
         ctx.func.name = ExternalName::user(0, func.as_u32());
 
         let dfp_decl = {
-            let mut dfp_sig = module.make_signature();
+            let mut dfp_sig = self.module.make_signature();
 
             dfp_sig.params.push(AbiParam::new(types::I64));
             dfp_sig
                 .returns
-                .push(AbiParam::new(module.isa().pointer_type()));
+                .push(AbiParam::new(self.module.isa().pointer_type()));
 
-            let dfp_func_id = module
+            let dfp_func_id = self
+                .module
                 .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
                 .unwrap();
 
-            module.declare_func_in_func(dfp_func_id, &mut ctx.func)
+            self.module.declare_func_in_func(dfp_func_id, &mut ctx.func)
         };
 
         let mut func_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
-        declare_externs(self, &mut module, &mut builder)?;
+        declare_externs(self, &mut builder)?;
 
         let ebb = builder.create_ebb();
         builder.switch_to_block(ebb);
         builder.append_ebb_params_for_function_params(ebb);
 
-        let mut fb = FunctionBackend {
-            backend: self,
-            builder,
-            current_block: ebb,
-            string_literal_data_ids,
-            dynamic_fn_ptr_decl: dfp_decl,
-            module: &mut module,
-        };
+        {
+            let mut fb = FunctionBackend {
+                backend: self,
+                builder,
+                current_block: ebb,
+                dynamic_fn_ptr_decl: dfp_decl,
+            };
 
-        for &param in params.iter() {
-            fb.compile_id(param)?;
+            for &param in params.iter() {
+                fb.compile_id(param)?;
+            }
+
+            // make the call
+            let magic_param = {
+                let current_fn_params = fb.builder.ebb_params(fb.current_block);
+                *current_fn_params.last().unwrap()
+            };
+            let normal_params = params
+                .iter()
+                .map(|param| fb.rvalue(*param))
+                .collect::<Vec<_>>();
+            let mut cranelift_params = normal_params;
+            cranelift_params.push(magic_param);
+
+            let found_macro = fb.backend.funcs[&hoisting_name];
+            let found_macro = fb
+                .backend
+                .module
+                .declare_func_in_func(found_macro, &mut fb.builder.func);
+
+            let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
+            let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
+
+            fb.builder.ins().return_(&[return_value]);
+
+            fb.builder.seal_all_blocks();
+            fb.builder.finalize();
         }
-
-        // make the call
-        let magic_param = {
-            let current_fn_params = fb.builder.ebb_params(fb.current_block);
-            *current_fn_params.last().unwrap()
-        };
-        let normal_params = params
-            .iter()
-            .map(|param| fb.rvalue(*param))
-            .collect::<Vec<_>>();
-        let mut cranelift_params = normal_params;
-        cranelift_params.push(magic_param);
-
-        let found_macro = fb.backend.funcs[&hoisting_name];
-        let found_macro = fb
-            .module
-            .declare_func_in_func(found_macro, &mut fb.builder.func);
-
-        let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
-        let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
-
-        fb.builder.ins().return_(&[return_value]);
-
-        fb.builder.seal_all_blocks();
-        fb.builder.finalize();
 
         // Debug macro
         // println!("{}", ctx.func.display(None));
 
-        module.define_function(func, &mut ctx).unwrap();
-        module.clear_context(&mut ctx);
+        self.module.define_function(func, &mut ctx).unwrap();
+        self.module.clear_context(&mut ctx);
 
-        module.finalize_definitions();
+        self.module.finalize_definitions();
 
-        Ok(module.get_finalized_function(func))
-    }
-
-    fn get_string_literal_data_ids(
-        &mut self,
-        module: &mut Module<SimpleJITBackend>,
-    ) -> BTreeMap<Id, DataId> {
-        let mut string_literal_data_ids = BTreeMap::new();
-
-        for lit in self.semantic.parser.string_literals.clone() {
-            // declare data section for string literals
-            let string_literal_data_id = module
-                .declare_data(&format!("str_lit_{}", lit), Linkage::Local, false, None)
-                .unwrap();
-
-            let mut data_ctx = DataContext::new();
-            let mut lits = String::new();
-            let lit_sym = match self.semantic.parser.nodes[lit] {
-                Node::StringLiteral { sym, .. } => sym,
-                _ => unreachable!(),
-            };
-            let lit_str = self.resolve_symbol(lit_sym);
-
-            lits += lit_str.as_str();
-
-            let raw_bytes: Box<[u8]> = lits.into_boxed_str().into_boxed_bytes();
-            data_ctx.define(raw_bytes);
-
-            module
-                .define_data(string_literal_data_id, &data_ctx)
-                .unwrap();
-
-            string_literal_data_ids.insert(lit, string_literal_data_id);
-        }
-
-        string_literal_data_ids
+        Ok(self.module.get_finalized_function(func))
     }
 
     // Returns whether the value for a particular id is the value itself, or a pointer to the value
@@ -718,6 +674,47 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 }
 
+fn get_string_literal_data_ids(
+    semantic: &Semantic,
+    module: &mut Module<SimpleJITBackend>,
+) -> BTreeMap<Id, DataId> {
+    let mut string_literal_data_ids = BTreeMap::new();
+
+    for lit in semantic.parser.string_literals.clone() {
+        // declare data section for string literals
+        let string_literal_data_id = module
+            .declare_data(&format!("str_lit_{}", lit), Linkage::Local, false, None)
+            .unwrap();
+
+        let mut data_ctx = DataContext::new();
+        let mut lits = String::new();
+        let lit_sym = match semantic.parser.nodes[lit] {
+            Node::StringLiteral { sym, .. } => sym,
+            _ => unreachable!(),
+        };
+        let lit_str = semantic
+            .parser
+            .lexer
+            .string_interner
+            .resolve(lit_sym)
+            .unwrap()
+            .to_string();
+
+        lits += lit_str.as_str();
+
+        let raw_bytes: Box<[u8]> = lits.into_boxed_str().into_boxed_bytes();
+        data_ctx.define(raw_bytes);
+
+        module
+            .define_data(string_literal_data_id, &data_ctx)
+            .unwrap();
+
+        string_literal_data_ids.insert(lit_sym, string_literal_data_id);
+    }
+
+    string_literal_data_ids
+}
+
 // fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
 //     let range = semantic.parser.ranges[id];
 
@@ -734,9 +731,7 @@ pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub backend: &'a mut Backend<'b, 'c>,
     pub builder: FunctionBuilder<'d>,
     pub current_block: Ebb,
-    pub string_literal_data_ids: BTreeMap<Id, DataId>,
     pub dynamic_fn_ptr_decl: FuncRef,
-    pub module: &'a mut Module<SimpleJITBackend>,
 }
 
 impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
@@ -799,13 +794,13 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
     }
 
     fn store_copy(&mut self, id: Id, dest: &Value) {
-        let size = type_size(&self.backend.semantic, &self.module, id);
+        let size = type_size(&self.backend.semantic, &self.backend.module, id);
 
         let source_value = self.as_value(id);
         let dest_value = dest.as_value_relaxed(self);
 
         self.builder.emit_small_memcpy(
-            self.module.isa().frontend_config(),
+            self.backend.module.isa().frontend_config(),
             dest_value,
             source_value,
             size as _,
@@ -818,8 +813,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         if self.backend.rvalue_is_ptr(id) {
             let ty = &self.backend.semantic.types[id];
             let ty = match ty {
-                Type::Struct { .. } => self.module.isa().pointer_type(),
-                Type::Enum { .. } => self.module.isa().pointer_type(),
+                Type::Struct { .. } => self.backend.module.isa().pointer_type(),
+                Type::Enum { .. } => self.backend.module.isa().pointer_type(),
                 _ => into_cranelift_type(&self.backend, id).unwrap(),
             };
 
@@ -849,7 +844,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 let value = self.rvalue(return_id);
                 self.backend.values[id] = Value::Value(value);
 
-                let return_size = type_size(&self.backend.semantic, &self.module, return_id);
+                let return_size =
+                    type_size(&self.backend.semantic, &self.backend.module, return_id);
                 if return_size > 0 {
                     self.builder.ins().return_(&[value]);
                 } else {
@@ -877,16 +873,17 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.set_value(id, value);
 
                 if self.backend.semantic.parser.node_is_addressable[id] {
-                    let size = type_size(&self.backend.semantic, &self.module, id);
+                    let size = type_size(&self.backend.semantic, &self.backend.module, id);
                     let slot = self.builder.create_stack_slot(StackSlotData {
                         kind: StackSlotKind::ExplicitSlot,
                         size,
                         offset: None,
                     });
-                    let slot_addr =
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let slot_addr = self.builder.ins().stack_addr(
+                        self.backend.module.isa().pointer_type(),
+                        slot,
+                        0,
+                    );
                     let value = Value::Value(slot_addr);
                     self.store_value(id, &value, None);
                     self.backend.values[id] = value;
@@ -907,7 +904,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     assert_eq!(params.len(), 1);
                     let param = params[0];
-                    let size = type_size(&self.backend.semantic, &self.module, param)
+                    let size = type_size(&self.backend.semantic, &self.backend.module, param)
                         + ENUM_TAG_SIZE_BYTES;
 
                     let slot = self.builder.create_stack_slot(StackSlotData {
@@ -915,10 +912,11 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         size,
                         offset: None,
                     });
-                    let addr =
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let addr = self.builder.ins().stack_addr(
+                        self.backend.module.isa().pointer_type(),
+                        slot,
+                        0,
+                    );
 
                     self.backend.values[id] = Value::Value(addr);
 
@@ -945,16 +943,17 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 // todo(chad): @Optimization: this is about the slowest thing we could ever do, but works great.
                 // Come back later once everything is working and make it fast
-                let size = type_size(&self.backend.semantic, &self.module, id);
+                let size = type_size(&self.backend.semantic, &self.backend.module, id);
                 let slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
                     offset: None,
                 });
-                let addr = self
-                    .builder
-                    .ins()
-                    .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                let addr = self.builder.ins().stack_addr(
+                    self.backend.module.isa().pointer_type(),
+                    slot,
+                    0,
+                );
 
                 self.backend.values[id] = Value::Value(addr);
 
@@ -962,7 +961,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 for param in self.backend.semantic.parser.id_vec(params).clone() {
                     self.compile_id(param)?;
                     self.store_with_offset(param, &Value::Value(addr), offset);
-                    offset += type_size(&self.backend.semantic, &self.module, param) as i32;
+                    offset += type_size(&self.backend.semantic, &self.backend.module, param) as i32;
                 }
 
                 Ok(())
@@ -1047,17 +1046,18 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 ty: _,   // Id
                 expr,    // Id
             } => {
-                let size = type_size(&self.backend.semantic, &self.module, id);
+                let size = type_size(&self.backend.semantic, &self.backend.module, id);
                 let slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
                     offset: None,
                 });
 
-                let slot_addr =
-                    self.builder
-                        .ins()
-                        .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                let slot_addr = self.builder.ins().stack_addr(
+                    self.backend.module.isa().pointer_type(),
+                    slot,
+                    0,
+                );
                 let value = Value::Value(slot_addr);
 
                 if let Some(expr) = expr {
@@ -1086,7 +1086,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     let mut addr = self.backend.values[name].clone().as_value_relaxed(self);
                     if self.backend.rvalue_is_ptr(name) {
-                        addr = self.load(self.module.isa().pointer_type(), addr, 0);
+                        addr = self.load(self.backend.module.isa().pointer_type(), addr, 0);
                     }
 
                     self.store(expr, &Value::Value(addr));
@@ -1182,16 +1182,17 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 // if we are meant to be addressable, then we need to store our actual value into something which has an address
                 if self.backend.semantic.parser.node_is_addressable[id] {
                     // todo(chad): is there any benefit to creating all of these up front?
-                    let size = self.module.isa().pointer_bytes() as u32;
+                    let size = self.backend.module.isa().pointer_bytes() as u32;
                     let slot = self.builder.create_stack_slot(StackSlotData {
                         kind: StackSlotKind::ExplicitSlot,
                         size,
                         offset: None,
                     });
-                    let slot_addr =
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let slot_addr = self.builder.ins().stack_addr(
+                        self.backend.module.isa().pointer_type(),
+                        slot,
+                        0,
+                    );
                     let value = Value::Value(slot_addr);
                     self.store_value(id, &value, None);
                     self.backend.values[id] = value;
@@ -1209,8 +1210,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 let ty = &self.backend.semantic.types[id];
                 let ty = match ty {
-                    Type::Struct { .. } => self.module.isa().pointer_type(),
-                    Type::Enum { .. } => self.module.isa().pointer_type(),
+                    Type::Struct { .. } => self.backend.module.isa().pointer_type(),
+                    Type::Enum { .. } => self.backend.module.isa().pointer_type(),
                     _ => into_cranelift_type(&self.backend, id)?,
                 };
 
@@ -1241,17 +1242,18 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     Ok(())
                 } else {
                     // we need our own storage
-                    let size = type_size(&self.backend.semantic, &self.module, id);
+                    let size = type_size(&self.backend.semantic, &self.backend.module, id);
                     let slot = self.builder.create_stack_slot(StackSlotData {
                         kind: StackSlotKind::ExplicitSlot,
                         size,
                         offset: None,
                     });
 
-                    let slot_addr =
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let slot_addr = self.builder.ins().stack_addr(
+                        self.backend.module.isa().pointer_type(),
+                        slot,
+                        0,
+                    );
                     let value = Value::Value(slot_addr);
 
                     let params = self.builder.ebb_params(self.current_block);
@@ -1301,7 +1303,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     if loaded {
                         // if we are doing field access through a pointer, do an extra load
-                        base = self.load(self.module.isa().pointer_type(), base, 0);
+                        base = self.load(self.backend.module.isa().pointer_type(), base, 0);
                     }
 
                     match field_name.as_str() {
@@ -1343,7 +1345,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                             },
                         )
                         .take(field_index as usize)
-                        .map(|ty| type_size(&self.backend.semantic, &self.module, ty))
+                        .map(|ty| type_size(&self.backend.semantic, &self.backend.module, ty))
                         .sum::<u32>()
                 };
 
@@ -1351,7 +1353,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 if loaded {
                     // if we are doing field access through a pointer, do an extra load
-                    base = self.load(self.module.isa().pointer_type(), base, 0);
+                    base = self.load(self.backend.module.isa().pointer_type(), base, 0);
                 }
 
                 if is_enum && is_assignment {
@@ -1383,10 +1385,11 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         size: 8,
                         offset: None,
                     });
-                    let slot_addr =
-                        self.builder
-                            .ins()
-                            .stack_addr(self.module.isa().pointer_type(), slot, 0);
+                    let slot_addr = self.builder.ins().stack_addr(
+                        self.backend.module.isa().pointer_type(),
+                        slot,
+                        0,
+                    );
                     let value = Value::Value(slot_addr);
                     self.store_value(id, &value, None);
                     self.backend.values[id] = value;
@@ -1405,16 +1408,16 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 let len_value = self.builder.ins().iconst(types::I64, element_count as i64);
 
                 let struct_addr_value = {
-                    let element_size = type_size(&self.backend.semantic, &self.module, ty);
-                    let struct_size =
-                        type_size(&self.backend.semantic, &self.module, ty) * element_count as u32;
+                    let element_size = type_size(&self.backend.semantic, &self.backend.module, ty);
+                    let struct_size = type_size(&self.backend.semantic, &self.backend.module, ty)
+                        * element_count as u32;
                     let struct_slot = self.builder.create_stack_slot(StackSlotData {
                         kind: StackSlotKind::ExplicitSlot,
                         size: struct_size,
                         offset: None,
                     });
                     let struct_slot_addr = self.builder.ins().stack_addr(
-                        self.module.isa().pointer_type(),
+                        self.backend.module.isa().pointer_type(),
                         struct_slot,
                         0,
                     );
@@ -1430,16 +1433,17 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     struct_slot_addr
                 };
 
-                let size = type_size(&self.backend.semantic, &self.module, id);
+                let size = type_size(&self.backend.semantic, &self.backend.module, id);
                 let struct_slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
                     offset: None,
                 });
-                let dest_addr =
-                    self.builder
-                        .ins()
-                        .stack_addr(self.module.isa().pointer_type(), struct_slot, 0);
+                let dest_addr = self.builder.ins().stack_addr(
+                    self.backend.module.isa().pointer_type(),
+                    struct_slot,
+                    0,
+                );
 
                 // store the length
                 self.builder
@@ -1455,29 +1459,31 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
-            Node::StringLiteral { bytes, .. } => {
-                let lit_id = self.string_literal_data_ids[&id];
+            Node::StringLiteral { sym, bytes } => {
+                let lit_id = self.backend.string_literal_data_ids[&sym];
 
                 let string_lit_ptr = self
+                    .backend
                     .module
                     .declare_data_in_func(lit_id, &mut self.builder.func);
                 let global = self
                     .builder
                     .ins()
-                    .global_value(self.module.isa().pointer_type(), string_lit_ptr);
+                    .global_value(self.backend.module.isa().pointer_type(), string_lit_ptr);
 
                 let len_value = self.builder.ins().iconst(types::I64, bytes as i64);
 
-                let size = type_size(&self.backend.semantic, &self.module, id);
+                let size = type_size(&self.backend.semantic, &self.backend.module, id);
                 let struct_slot = self.builder.create_stack_slot(StackSlotData {
                     kind: StackSlotKind::ExplicitSlot,
                     size,
                     offset: None,
                 });
-                let dest_addr =
-                    self.builder
-                        .ins()
-                        .stack_addr(self.module.isa().pointer_type(), struct_slot, 0);
+                let dest_addr = self.builder.ins().stack_addr(
+                    self.backend.module.isa().pointer_type(),
+                    struct_slot,
+                    0,
+                );
 
                 // store the length
                 self.builder
@@ -1498,9 +1504,9 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.compile_id(index)?;
 
                 let struct_ptr = self.backend.values[arr].as_addr().as_value_relaxed(self);
-                let data_ptr = self.load(self.module.isa().pointer_type(), struct_ptr, 8);
+                let data_ptr = self.load(self.backend.module.isa().pointer_type(), struct_ptr, 8);
 
-                let element_size = type_size(&self.backend.semantic, &self.module, id);
+                let element_size = type_size(&self.backend.semantic, &self.backend.module, id);
                 let element_size = self.builder.ins().iconst(types::I64, element_size as i64);
 
                 let index = self.rvalue(index);
@@ -1545,7 +1551,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         // let mut data_ctx = DataContext::new();
         // data_ctx.define_zeroinit(bytes as usize);
 
-        // self.module.define_data(data_id, &data_ctx).unwrap();
+        // self.backend.module.define_data(data_id, &data_ctx).unwrap();
 
         // let ptr = self
         //     .module
@@ -1553,7 +1559,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
         // self.builder
         //     .ins()
-        //     .symbol_value(self.module.isa().pointer_type(), ptr)
+        //     .symbol_value(self.backend.module.isa().pointer_type(), ptr)
 
         // HACK
         let slot = self.builder.create_stack_slot(StackSlotData {
@@ -1563,11 +1569,12 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         });
         self.builder
             .ins()
-            .stack_addr(self.module.isa().pointer_type(), slot, 0)
+            .stack_addr(self.backend.module.isa().pointer_type(), slot, 0)
     }
 
     fn declare_global_data_with_bytes(&mut self, name: &str, bytes: Box<[u8]>) -> CraneliftValue {
         let data_id = self
+            .backend
             .module
             .declare_data(name, Linkage::Local, true, None)
             .unwrap();
@@ -1575,18 +1582,19 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let mut data_ctx = DataContext::new();
         data_ctx.define(bytes);
 
-        self.module.define_data(data_id, &data_ctx).unwrap();
+        self.backend.module.define_data(data_id, &data_ctx).unwrap();
 
-        self.module.finalize_definitions();
-        self.module.get_finalized_data(data_id);
+        self.backend.module.finalize_definitions();
+        self.backend.module.get_finalized_data(data_id);
 
         let ptr = self
+            .backend
             .module
             .declare_data_in_func(data_id, &mut self.builder.func);
 
         self.builder
             .ins()
-            .symbol_value(self.module.isa().pointer_type(), ptr)
+            .symbol_value(self.backend.module.isa().pointer_type(), ptr)
     }
 
     fn get_global_ptr_to_type_of(&mut self, id: Id) -> CraneliftValue {
@@ -1595,7 +1603,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         // allocate struct
         let struct_size = type_size(
             &self.backend.semantic,
-            &self.module,
+            &self.backend.module,
             self.backend.semantic.parser.ty_decl.unwrap(),
         );
 
@@ -1653,7 +1661,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 // allocate array data ptr
                 let size_of_ty = type_size(
                     &self.backend.semantic,
-                    &self.module,
+                    &self.backend.module,
                     self.backend.semantic.parser.ty_decl.unwrap(),
                 );
                 let size_of_struct = size_of_ty + 16; // 16 for `name: string` param
@@ -1694,7 +1702,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     let ty_ptr = self.get_global_ptr_to_type_of(ty);
                     let ty_dest_value = self.builder.ins().iadd_imm(array_data_ptr, offset as i64);
                     self.builder.emit_small_memcpy(
-                        self.module.isa().frontend_config(),
+                        self.backend.module.isa().frontend_config(),
                         ty_dest_value,
                         ty_ptr,
                         size_of_ty as _,
@@ -1710,7 +1718,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     .ins()
                     .iadd_imm(dest_addr, ENUM_TAG_SIZE_BYTES as i64);
                 self.builder.emit_small_memcpy(
-                    self.module.isa().frontend_config(),
+                    self.backend.module.isa().frontend_config(),
                     dest_addr,
                     array_ptr,
                     16,
@@ -1745,7 +1753,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             _ => None,
         }
         .unwrap();
-        let return_size = type_size(&self.backend.semantic, &self.module, return_ty);
+        let return_size = type_size(&self.backend.semantic, &self.backend.module, return_ty);
 
         // direct call?
         if let Value::FuncRef(fr) = self.backend.values[name] {
@@ -1776,7 +1784,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let value = self.builder.func.dfg.inst_results(call_inst)[0];
 
         // Now call indirect
-        let mut sig = self.module.make_signature();
+        let mut sig = self.backend.module.make_signature();
         for param in params.iter() {
             sig.params
                 .push(AbiParam::new(into_cranelift_type(&self.backend, *param)?));
@@ -1893,11 +1901,10 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
 
 fn declare_externs<'a, 'b, 'c>(
     backend: &mut Backend<'a, 'b>,
-    module: &mut Module<SimpleJITBackend>,
     builder: &mut FunctionBuilder<'c>,
 ) -> Result<(), CompileError> {
     for ext in backend.semantic.parser.externs.clone() {
-        let mut sig = module.make_signature();
+        let mut sig = backend.module.make_signature();
 
         let (name, params, return_ty) = match backend.semantic.parser.nodes[ext] {
             Node::Extern {
@@ -1908,7 +1915,7 @@ fn declare_externs<'a, 'b, 'c>(
             _ => unreachable!(),
         };
 
-        let return_size = type_size(backend.semantic, &module, return_ty);
+        let return_size = type_size(backend.semantic, &backend.module, return_ty);
         if return_size > 0 {
             sig.returns
                 .push(AbiParam::new(into_cranelift_type(backend, return_ty)?));
@@ -1928,12 +1935,16 @@ fn declare_externs<'a, 'b, 'c>(
             .unwrap()
             .to_string();
 
-        let func_id = module
+        let func_id = backend
+            .module
             .declare_function(&name, Linkage::Import, &sig)
             .unwrap();
 
-        backend.values[ext] =
-            Value::FuncRef(module.declare_func_in_func(func_id, &mut builder.func));
+        backend.values[ext] = Value::FuncRef(
+            backend
+                .module
+                .declare_func_in_func(func_id, &mut builder.func),
+        );
     }
 
     Ok(())
