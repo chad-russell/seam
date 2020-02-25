@@ -2,6 +2,8 @@
 
 ## Definitely Implement
 
+- [ ] while
+- [ ] finish println
 - [ ] routine to push token from a macro
 - [ ] debugging
 - [ ] check enum tag when accessing through a field
@@ -11,7 +13,6 @@
 - [ ] if as value expression
 - [ ] `else if`
 - [ ] short-circuit logical `and` and `or`
-- [ ] while
 - [ ] for (with macros?)
 - [ ] f32/f64
 - [ ] structs as function parameters / return values
