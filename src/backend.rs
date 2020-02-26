@@ -145,7 +145,12 @@ impl<'a, 'b> Backend<'a, 'b> {
         Ok(())
     }
 
-    pub fn generate_macro_call_order(&self, call_id: Id, mac_topo: &mut Vec<Id>) {
+    pub fn generate_macro_call_order(
+        &self,
+        call_id: Id,
+        started: &mut Vec<Id>,
+        mac_topo: &mut Vec<Id>,
+    ) {
         let macro_name = match self.semantic.parser.nodes[call_id] {
             Node::MacroCall { name, .. } => name,
             _ => unreachable!(),
@@ -153,7 +158,12 @@ impl<'a, 'b> Backend<'a, 'b> {
         let resolved_macro = self.semantic.resolve(macro_name).unwrap();
         let resolved_scope = self.semantic.parser.node_scopes[resolved_macro];
 
-        // let func = self.semantic.parser.function_by_macro_call[&resolved_scope];
+        if started.contains(&resolved_macro) {
+            return;
+        }
+
+        started.push(resolved_macro);
+
         let calls_before = self
             .semantic
             .parser
@@ -163,7 +173,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         if let Some(calls_before) = calls_before {
             for &cb in calls_before {
                 if cb != call_id {
-                    self.generate_macro_call_order(cb, mac_topo);
+                    self.generate_macro_call_order(cb, started, mac_topo);
                 }
             }
         }
@@ -171,6 +181,9 @@ impl<'a, 'b> Backend<'a, 'b> {
         if !mac_topo.contains(&call_id) {
             mac_topo.push(call_id);
         }
+
+        let pos = started.iter().position(|&e| e == resolved_macro).unwrap();
+        started.swap_remove(pos);
     }
 
     pub fn assign_top_level_types(&mut self) -> Result<(), CompileError> {
@@ -181,8 +194,9 @@ impl<'a, 'b> Backend<'a, 'b> {
         }
 
         let mut mac_topo = Vec::new();
+        let mut mac_started = Vec::new();
         for t in self.semantic.parser.macro_calls.clone() {
-            self.generate_macro_call_order(t, &mut mac_topo);
+            self.generate_macro_call_order(t, &mut mac_started, &mut mac_topo);
         }
 
         for t in mac_topo {
@@ -482,7 +496,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 };
 
                 // todo(chad): if the macro is Tokens -> Tokens with no other params, we should NOT build this extra layer
-                let compiled_macro = self.build_hoisted_function(params, name)?;
+                let compiled_macro = self.build_hoisted_function(id, params, name)?;
                 let compiled_macro: fn(semantic: *mut Semantic) -> i64 =
                     unsafe { std::mem::transmute(compiled_macro) };
                 let tokens_id = compiled_macro(self.semantic as *mut _);
@@ -535,6 +549,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
     pub fn build_hoisted_function(
         &mut self,
+        call_id: Id,
         params: Vec<Id>,
         hoisting_name: Sym,
     ) -> Result<*const u8, CompileError> {
@@ -570,7 +585,11 @@ impl<'a, 'b> Backend<'a, 'b> {
 
         let func = self
             .module
-            .declare_function("hoist", Linkage::Local, &ctx.func.signature)
+            .declare_function(
+                &format!("hoist_{}", call_id),
+                Linkage::Local,
+                &ctx.func.signature,
+            )
             .unwrap();
         ctx.func.name = ExternalName::user(0, func.as_u32());
 
