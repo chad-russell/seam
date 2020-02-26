@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, Lexeme, Node, Parser, Range, Token, Type};
+use crate::parser::{BasicType, CompileError, Id, IdVec, Lexeme, Node, Parser, Range, Token, Type};
 use crate::semantic::Semantic;
 
 use cranelift::codegen::ir::{
@@ -102,6 +102,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             jit_builder.symbol("print_i32", print_i32 as *const u8);
             jit_builder.symbol("print_i64", print_i64 as *const u8);
             jit_builder.symbol("print_string", print_string as *const u8);
+            jit_builder.symbol("print_newline", print_newline as *const u8);
             // for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
             //     jit_builder.symbol(self.resolve_symbol(name), ptr.0);
             // }
@@ -450,6 +451,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                     builder,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
+                    data_map: BTreeMap::new(),
                 };
 
                 for stmt in fb.backend.semantic.parser.id_vec(stmts).clone() {
@@ -624,6 +626,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 builder,
                 current_block: ebb,
                 dynamic_fn_ptr_decl: dfp_decl,
+                data_map: BTreeMap::new(),
             };
 
             for &param in params.iter() {
@@ -751,6 +754,7 @@ pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub builder: FunctionBuilder<'d>,
     pub current_block: Ebb,
     pub dynamic_fn_ptr_decl: FuncRef,
+    pub data_map: BTreeMap<Id, CraneliftValue>,
 }
 
 impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
@@ -1008,6 +1012,34 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 // todo(chad): store if necessary
                 Ok(())
             }
+            Node::LessThan(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                // todo(chad): @Optimization utilize the `br_icmp` instruction in cranelift for the `if a == b` or `if a != b` case
+                let value = self.builder.ins().icmp(IntCC::SignedLessThan, lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
+            Node::GreaterThan(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                // todo(chad): @Optimization utilize the `br_icmp` instruction in cranelift for the `if a == b` or `if a != b` case
+                let value = self.builder.ins().icmp(IntCC::SignedGreaterThan, lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
             Node::Add(lhs, rhs) => {
                 self.compile_id(lhs)?;
                 self.compile_id(rhs)?;
@@ -1184,6 +1216,50 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     let current_params = self.builder.ebb_params(self.current_block).to_owned();
                     self.builder.ins().jump(cont_block, &current_params);
+                }
+
+                self.builder.switch_to_block(cont_block);
+                self.current_block = cont_block;
+
+                Ok(())
+            }
+            Node::While { cond, stmts } => {
+                let check_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(check_block);
+
+                let true_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(true_block);
+
+                let cont_block = self.builder.create_ebb();
+                self.builder
+                    .append_ebb_params_for_function_params(cont_block);
+
+                // put the check and branch inside a block
+                let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                self.builder.ins().jump(check_block, &current_params);
+                self.builder.switch_to_block(check_block);
+                self.current_block = check_block;
+
+                self.compile_id(cond)?;
+                let cond = self.rvalue(cond);
+
+                let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                self.builder.ins().brnz(cond, true_block, &current_params);
+                self.builder.ins().jump(cont_block, &current_params);
+
+                // true
+                {
+                    self.builder.switch_to_block(true_block);
+                    self.current_block = true_block;
+
+                    for stmt in self.backend.semantic.parser.id_vec(stmts).clone() {
+                        self.compile_id(stmt)?;
+                    }
+
+                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                    self.builder.ins().jump(check_block, &current_params);
                 }
 
                 self.builder.switch_to_block(cont_block);
@@ -1561,34 +1637,36 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         }
     }
 
-    fn declare_global_data_with_size(&mut self, _name: &str, bytes: u32) -> CraneliftValue {
-        // let data_id = self
-        //     .module
-        //     .declare_data(name, Linkage::Local, true, None)
-        //     .unwrap();
+    fn declare_global_data_with_size(&mut self, name: &str, bytes: u32) -> CraneliftValue {
+        let data_id = self
+            .backend
+            .module
+            .declare_data(name, Linkage::Local, true, None)
+            .unwrap();
 
-        // let mut data_ctx = DataContext::new();
-        // data_ctx.define_zeroinit(bytes as usize);
+        let mut data_ctx = DataContext::new();
+        data_ctx.define_zeroinit(bytes as usize);
 
-        // self.backend.module.define_data(data_id, &data_ctx).unwrap();
+        self.backend.module.define_data(data_id, &data_ctx).unwrap();
 
-        // let ptr = self
-        //     .module
-        //     .declare_data_in_func(data_id, &mut self.builder.func);
+        let ptr = self
+            .backend
+            .module
+            .declare_data_in_func(data_id, &mut self.builder.func);
 
-        // self.builder
-        //     .ins()
-        //     .symbol_value(self.backend.module.isa().pointer_type(), ptr)
-
-        // HACK
-        let slot = self.builder.create_stack_slot(StackSlotData {
-            kind: StackSlotKind::ExplicitSlot,
-            size: bytes,
-            offset: None,
-        });
         self.builder
             .ins()
-            .stack_addr(self.backend.module.isa().pointer_type(), slot, 0)
+            .symbol_value(self.backend.module.isa().pointer_type(), ptr)
+
+        // HACK
+        // let slot = self.builder.create_stack_slot(StackSlotData {
+        //     kind: StackSlotKind::ExplicitSlot,
+        //     size: bytes,
+        //     offset: None,
+        // });
+        // self.builder
+        //     .ins()
+        //     .stack_addr(self.backend.module.isa().pointer_type(), slot, 0)
     }
 
     fn declare_global_data_with_bytes(&mut self, name: &str, bytes: Box<[u8]>) -> CraneliftValue {
@@ -1617,6 +1695,10 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
     }
 
     fn get_global_ptr_to_type_of(&mut self, id: Id) -> CraneliftValue {
+        if let Some(value) = self.data_map.get(&id) {
+            return *value;
+        }
+
         let ty = self.backend.semantic.types[id];
 
         // allocate struct
@@ -1642,6 +1724,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             _ => todo!("support #type_of for other types: {:?}", ty),
         };
         let dest_addr = self.declare_global_data_with_size(&format!("{}_typeof", id), struct_size);
+        self.data_map.insert(id, dest_addr);
 
         // store the tag
         let tag = self.builder.ins().iconst(types::I16, tag);
@@ -1649,113 +1732,123 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
         // store the data
         match ty {
-            Type::Pointer(_) => todo!("pointer data"),
-            Type::Array(_) => todo!("array data"),
-            Type::Struct { params, .. } => {
-                // []struct {
-                //     name: string,
-                //     type: Ty,
-                // }
-
-                let params = self
-                    .backend
-                    .semantic
-                    .parser
-                    .id_vec(params)
-                    .iter()
-                    .map(|&p| match self.backend.semantic.parser.nodes[p] {
-                        Node::DeclParam { name, ty, .. } => (self.backend.resolve_symbol(name), ty),
-                        _ => unreachable!(),
-                    })
-                    .collect::<Vec<_>>();
-
-                // allocate array
-                let array_ptr =
-                    self.declare_global_data_with_size(&format!("{}_typeof_struct_array", id), 16);
-
-                // set array len
-                let len = self.builder.ins().iconst(types::I64, params.len() as i64);
-                self.builder.ins().store(MemFlags::new(), len, array_ptr, 0);
-
-                // allocate array data ptr
-                let size_of_ty = type_size(
-                    &self.backend.semantic,
-                    &self.backend.module,
-                    self.backend.semantic.parser.ty_decl.unwrap(),
-                );
-                let size_of_struct = size_of_ty + 16; // 16 for `name: string` param
-                let array_data_ptr = self.declare_global_data_with_size(
-                    &format!("{}_typeof_struct_array_data", id),
-                    size_of_struct * params.len() as u32,
-                );
-
-                // set array data ptr
-                self.builder
-                    .ins()
-                    .store(MemFlags::new(), array_data_ptr, array_ptr, 8);
-
-                let mut offset = 0;
-                for (name, ty) in params {
-                    // store name length
-                    let name_len = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, name.bytes().len() as i64);
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), name_len, array_data_ptr, offset);
-                    offset += 8;
-
-                    // store the name ptr
-                    let name_ptr = self.declare_global_data_with_bytes(
-                        &format!("param_name_{}", name),
-                        name.into_boxed_str().into_boxed_bytes(),
-                    );
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), name_ptr, array_data_ptr, offset);
-                    offset += 8;
-
-                    // store ty
-                    // todo(chad): need a parameter on `get_global_ptr_to_type_of` that can store into a ptr instead of always allocating global space
-                    let ty_ptr = self.get_global_ptr_to_type_of(ty);
-                    let ty_dest_value = self.builder.ins().iadd_imm(array_data_ptr, offset as i64);
-                    self.builder.emit_small_memcpy(
-                        self.backend.module.isa().frontend_config(),
-                        ty_dest_value,
-                        ty_ptr,
-                        size_of_ty as _,
-                        1,
-                        1,
-                    );
-                    offset += size_of_ty as i32;
-                }
-
-                // store array into dest_addr
-                let dest_addr = self
-                    .builder
-                    .ins()
-                    .iadd_imm(dest_addr, ENUM_TAG_SIZE_BYTES as i64);
-                self.builder.emit_small_memcpy(
-                    self.backend.module.isa().frontend_config(),
+            Type::Pointer(pointer_id) => {
+                let pointer_ty_ptr = self.get_global_ptr_to_type_of(pointer_id);
+                self.builder.ins().store(
+                    MemFlags::new(),
+                    pointer_ty_ptr,
                     dest_addr,
-                    array_ptr,
-                    16,
-                    1,
-                    1,
+                    ENUM_TAG_SIZE_BYTES as i32,
                 );
-
-                // let d = self.builder.ins().iconst(types::I64, 123);
-                // self.builder
-                //     .ins()
-                //     .store(MemFlags::new(), d, dest_addr, offset as i32);
             }
-            Type::Enum { .. } => todo!("enum data"),
+            Type::Array(array_id) => {
+                let array_ty_ptr = self.get_global_ptr_to_type_of(array_id);
+                self.builder.ins().store(
+                    MemFlags::new(),
+                    array_ty_ptr,
+                    dest_addr,
+                    ENUM_TAG_SIZE_BYTES as i32,
+                );
+            }
+            Type::Struct { params, .. } => {
+                self.fill_type_of_for_struct_like_data(id, params, dest_addr)
+            }
+            Type::Enum { params, .. } => {
+                self.fill_type_of_for_struct_like_data(id, params, dest_addr)
+            }
             Type::Func { .. } => todo!("func data"),
             _ => (),
         };
 
         dest_addr
+    }
+
+    fn fill_type_of_for_struct_like_data(
+        &mut self,
+        id: Id,
+        params: IdVec,
+        dest_addr: CraneliftValue,
+    ) {
+        // []struct {
+        //     name: string,
+        //     type: Ty,
+        // }
+
+        let params = self
+            .backend
+            .semantic
+            .parser
+            .id_vec(params)
+            .iter()
+            .map(|&p| match self.backend.semantic.parser.nodes[p] {
+                Node::DeclParam { name, ty, .. } => (self.backend.resolve_symbol(name), ty),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+
+        // allocate array
+        let array_ptr =
+            self.declare_global_data_with_size(&format!("{}_typeof_struct_array", id), 16);
+
+        // set array len
+        let len = self.builder.ins().iconst(types::I64, params.len() as i64);
+        self.builder.ins().store(MemFlags::new(), len, array_ptr, 0);
+
+        // allocate array data ptr
+        let size_of_struct = 24; // 16 for `name: string`, 8 for `type: *Ty`
+        let array_data_ptr = self.declare_global_data_with_size(
+            &format!("{}_typeof_struct_array_data", id),
+            size_of_struct * params.len() as u32,
+        );
+
+        // set array data ptr
+        self.builder
+            .ins()
+            .store(MemFlags::new(), array_data_ptr, array_ptr, 8);
+
+        let mut offset = 0;
+        for (name, ty) in params {
+            // store name length
+            let name_len = self
+                .builder
+                .ins()
+                .iconst(types::I64, name.bytes().len() as i64);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), name_len, array_data_ptr, offset);
+            offset += 8;
+
+            // store the name ptr
+            let name_ptr = self.declare_global_data_with_bytes(
+                &format!("param_name_{}_{}", id, name),
+                name.into_boxed_str().into_boxed_bytes(),
+            );
+            self.builder
+                .ins()
+                .store(MemFlags::new(), name_ptr, array_data_ptr, offset);
+            offset += 8;
+
+            // store ty
+            let ty_ptr = self.get_global_ptr_to_type_of(ty);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), ty_ptr, array_data_ptr, offset);
+            offset += 8;
+        }
+
+        // store array into dest_addr
+        let dest_addr = self
+            .builder
+            .ins()
+            .iadd_imm(dest_addr, ENUM_TAG_SIZE_BYTES as i64);
+        self.builder.emit_small_memcpy(
+            self.backend.module.isa().frontend_config(),
+            dest_addr,
+            array_ptr,
+            16,
+            1,
+            1,
+        );
     }
 
     fn compile_call(&mut self, id: Id, name: Id, params: &[Id]) -> Result<(), CompileError> {
@@ -1974,23 +2067,27 @@ fn dynamic_fn_ptr(sym: Sym) -> *const u8 {
 }
 
 fn print_i8(n: i8) {
-    println!("{}", n);
+    print!("{}", n);
 }
 
 fn print_i16(n: i16) {
-    println!("{}", n);
+    print!("{}", n);
 }
 
 fn print_i32(n: i32) {
-    println!("{}", n);
+    print!("{}", n);
 }
 
 fn print_i64(n: i64) {
-    println!("{}", n);
+    print!("{}", n);
 }
 
 fn print_string(len: i64, bytes: *mut u8) {
     let s = unsafe { String::from_raw_parts(bytes, len as usize, len as usize) };
-    println!("{}", s);
+    print!("{}", s);
     std::mem::forget(s);
+}
+
+fn print_newline() {
+    println!();
 }

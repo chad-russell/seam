@@ -200,6 +200,18 @@ impl<'a> Semantic<'a> {
                 }
                 Ok(())
             }
+            Node::While {
+                cond,
+                stmts,
+            } => {
+                self.assign_type(cond)?;
+
+                for stmt in self.parser.id_vec(stmts).clone() {
+                    self.assign_type(stmt)?;
+                }
+
+                Ok(())
+            }
             Node::Field {
                 base,
                 field_name,
@@ -362,7 +374,7 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Add(lhs, rhs) | Node::Sub(lhs, rhs) | Node::Mul(lhs, rhs) | Node::Div(lhs, rhs) => {
+            Node::Add(lhs, rhs) | Node::Sub(lhs, rhs) | Node::Mul(lhs, rhs) | Node::Div(lhs, rhs) | Node::LessThan(lhs, rhs) | Node::GreaterThan(lhs, rhs) => {
                 self.assign_type(lhs)?;
                 self.assign_type(rhs)?;
                 self.match_types(lhs, rhs)?;
@@ -784,6 +796,8 @@ impl<'a> Semantic<'a> {
                 Ok(())
             }
             Node::TypeOf(expr) => {
+                self.types[id] = Type::Type;
+
                 self.assign_type(expr)?;
                 self.match_types(id, self.parser.ty_decl.unwrap())?;
 

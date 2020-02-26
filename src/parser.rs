@@ -147,6 +147,7 @@ pub enum Token {
     RCurly,
     LSquare,
     RSquare,
+    Turbofish,
     LAngle,
     RAngle,
     Semicolon,
@@ -170,6 +171,7 @@ pub enum Token {
     TypeOf,
     Cast,
     If,
+    While,
     Else,
     True,
     False,
@@ -431,6 +433,9 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("else", Token::Else) {
             return;
         }
+        if self.prefix_keyword("while", Token::While) {
+            return;
+        }
         if self.prefix_keyword("#cast", Token::Cast) {
             return;
         }
@@ -484,6 +489,9 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix("]", Token::RSquare) {
+            return;
+        }
+        if self.prefix("::<", Token::Turbofish) {
             return;
         }
         if self.prefix("<", Token::LAngle) {
@@ -733,6 +741,10 @@ pub enum Node {
         true_stmts: IdVec,
         false_stmts: IdVec,
     },
+    While {
+        cond: Id,
+        stmts: IdVec,
+    },
     Field {
         base: Id,
         field_name: Sym,
@@ -821,8 +833,8 @@ pub enum Node {
     Sub(Id, Id),
     Mul(Id, Id),
     Div(Id, Id),
-    // LessThan(Id, Id),
-    // GreaterThan(Id, Id),
+    LessThan(Id, Id),
+    GreaterThan(Id, Id),
     // EqualTo(Id, Id),
     // And(Id, Id),
     // Or(Id, Id),
@@ -1110,14 +1122,6 @@ impl<'a> Parser<'a> {
                     Ok(self.push_node(range, Node::TypeLiteral(BasicType::Bool.into())))
                 } else if sym == self.sym_string {
                     Ok(self.push_node(range, Node::TypeLiteral(Type::String)))
-                // } else if self.lexer.top.tok == Token::LAngle {
-                //     self.lexer.pop(); // `<`
-                //     let ct_params = self.parse_value_params(true)?;
-                //     let range = self.expect_range(range.start, Token::RAngle)?;
-                //     Ok(self.push_node(
-                //         range,
-                //         Node::TypeLiteral(Type::PolymorphSpecification(ct_params)),
-                //     ))
                 } else {
                     Ok(ident)
                 }
@@ -1151,9 +1155,6 @@ impl<'a> Parser<'a> {
     fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
         self.expect(&Token::If)?;
 
-        if start.line == 114 && start.col == 5 {
-            let _stopme = ();
-        }
         let cond_expr = match (&self.lexer.top.tok, &self.lexer.second.tok) {
             (Token::Symbol(_), Token::LCurly) => self.parse_symbol()?,
             _ => self.parse_expression()?,
@@ -1192,24 +1193,38 @@ impl<'a> Parser<'a> {
                 false_stmts,
             },
         ))
-
-        // self.local_insert(if_id);
-        // Ok(if_id)
     }
 
-    // fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
-    //     let cond = self.parse_expression()?;
+    fn parse_while(&mut self, start: Location) -> Result<Id, CompileError> {
+        self.expect(&Token::While)?;
 
-    //     let mut stmts = Vec::new();
-    //     while let Token::LParen = self.lexer.top.tok {
-    //         stmts.push(self.parse_fn_stmt()?);
-    //     }
-    //     let stmts = self.push_id_vec(stmts);
+        let cond_expr = match (&self.lexer.top.tok, &self.lexer.second.tok) {
+            (Token::Symbol(_), Token::LCurly) => self.parse_symbol()?,
+            _ => {
+                if start.line == 219 && start.col == 9 {
+                    let _stopme = 3;
+                }
+                self.parse_expression()?
+            }
+        };
+        self.expect(&Token::LCurly)?;
 
-    //     let range = self.expect_close_paren(start)?;
+        let mut stmts = Vec::new();
+        while self.lexer.top.tok != Token::RCurly {
+            stmts.push(self.parse_fn_stmt()?);
+        }
+        let stmts = self.push_id_vec(stmts);
 
-    //     Ok(self.push_node(range, Node::While { cond, stmts }))
-    // }
+        let range = self.expect_range(start, Token::RCurly)?;
+
+        Ok(self.push_node(
+            range,
+            Node::While {
+                cond: cond_expr,
+                stmts,
+            },
+        ))
+    }
 
     pub fn parse_expression(&mut self) -> Result<Id, CompileError> {
         let mut operators = Vec::new();
@@ -1219,7 +1234,13 @@ impl<'a> Parser<'a> {
 
         loop {
             match self.lexer.top.tok {
-                Token::EqEq | Token::Add | Token::Sub | Token::Mul | Token::Div => {
+                Token::EqEq
+                | Token::Add
+                | Token::Sub
+                | Token::Mul
+                | Token::Div
+                | Token::LAngle
+                | Token::RAngle => {
                     if !parsing_op {
                         break;
                     }
@@ -1313,6 +1334,22 @@ impl<'a> Parser<'a> {
                 let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
 
                 Ok(self.push_node(range, Node::Div(lhs, rhs)))
+            }
+            Shunting::Operator(Token::LAngle) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::LessThan(lhs, rhs)))
+            }
+            Shunting::Operator(Token::RAngle) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::GreaterThan(lhs, rhs)))
             }
             Shunting::Id(id) => Err(CompileError::from_string(
                 "Could not parse operator",
@@ -1427,9 +1464,8 @@ impl<'a> Parser<'a> {
                 // dot / function call / macro call / array access?
                 while self.lexer.top.tok == Token::Dot
                     || self.lexer.top.tok == Token::LParen
-                    || self.lexer.top.tok == Token::LCurly
                     || self.lexer.top.tok == Token::LSquare
-                    || self.lexer.top.tok == Token::LAngle
+                    || self.lexer.top.tok == Token::Turbofish
                     || self.lexer.top.tok == Token::Bang
                 {
                     if self.lexer.top.tok == Token::Dot {
@@ -1453,11 +1489,11 @@ impl<'a> Parser<'a> {
 
                         // all field accesses represent addressable memory
                         self.node_is_addressable[value] = true;
-                    } else if self.lexer.top.tok == Token::LAngle
+                    } else if self.lexer.top.tok == Token::Turbofish
                         || self.lexer.top.tok == Token::LParen
                     {
-                        let ct_params = if self.lexer.top.tok == Token::LAngle {
-                            self.lexer.pop(); // `<`
+                        let ct_params = if self.lexer.top.tok == Token::Turbofish {
+                            self.lexer.pop(); // `::<`
                             let params = self.parse_value_params(true)?;
                             self.expect(&Token::RAngle)?;
                             Some(params)
@@ -1525,8 +1561,6 @@ impl<'a> Parser<'a> {
                             .or_default()
                             .push(value);
                         self.function_by_macro_call.insert(value, cur_fun);
-                    } else if self.lexer.top.tok == Token::LCurly {
-                        todo!("parse named struct literal, e.g. 'Foo{{x: 3, y: 4}}'");
                     } else {
                         todo!("unhandled case for parser")
                     }
@@ -1597,6 +1631,7 @@ impl<'a> Parser<'a> {
 
         match self.lexer.top.tok {
             Token::If => self.parse_if(start),
+            Token::While => self.parse_while(start),
             Token::Symbol(sym) if sym == self.sym_return => {
                 self.lexer.pop(); // `return`
                 let expr = self.parse_expression()?;
