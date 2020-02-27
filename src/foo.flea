@@ -110,7 +110,7 @@ fn ty_size(ty: *Ty) i64 {
     }
     if tag == 7 {
         // pointer
-        size = 16;
+        size = 8;
     }
     if tag == 8 {
         // array
@@ -128,6 +128,18 @@ fn ty_size(ty: *Ty) i64 {
     }
     if tag == 10 {
         // enum
+        let casted_array: *struct{ len: i64 } = #cast &ty.Struct;
+
+        let field_index = 0;
+        while field_index < casted_array.len {
+            let maybe_new_size = ty_size(ty.Struct[field_index].type);
+            if maybe_new_size > size {
+                size = maybe_new_size;
+            }
+            field_index = field_index + 1;
+        }
+
+        size = size + 2; // 16 bytes for tag
     }
     if tag == 11 {
         // func (ptr)
@@ -177,7 +189,8 @@ fn main() i64 {
     // let a: Any = { ty: #type_of(s), val: #cast &s };
     // println(&a);
 
-    print_i64(ty_size(&#type_of(s)));
+    let ty: Ty = ---;
+    print_i64(ty_size(&#type_of(ty)));
 
     return 0;
 }

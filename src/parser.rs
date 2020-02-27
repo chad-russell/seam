@@ -1161,6 +1161,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(&Token::LCurly)?;
 
+        let true_scope = self.push_scope(false);
         let mut true_stmts = Vec::new();
         while self.lexer.top.tok != Token::RCurly {
             true_stmts.push(self.parse_fn_stmt()?);
@@ -1169,6 +1170,8 @@ impl<'a> Parser<'a> {
         self.expect(&Token::RCurly)?;
         let true_stmts = self.push_id_vec(true_stmts);
 
+        self.pop_scope(true_scope);
+        let false_scope = self.push_scope(false);
         let mut false_stmts = Vec::new();
         if self.lexer.top.tok == Token::Else {
             self.lexer.pop(); // `else`
@@ -1182,6 +1185,7 @@ impl<'a> Parser<'a> {
             self.expect(&Token::RCurly)?;
         }
         let false_stmts = self.push_id_vec(false_stmts);
+        self.pop_scope(false_scope);
 
         let range = Range::new(start, end);
 
@@ -1209,11 +1213,13 @@ impl<'a> Parser<'a> {
         };
         self.expect(&Token::LCurly)?;
 
+        let while_scope = self.push_scope(false);
         let mut stmts = Vec::new();
         while self.lexer.top.tok != Token::RCurly {
             stmts.push(self.parse_fn_stmt()?);
         }
         let stmts = self.push_id_vec(stmts);
+        self.pop_scope(while_scope);
 
         let range = self.expect_range(start, Token::RCurly)?;
 

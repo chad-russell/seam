@@ -2002,11 +2002,12 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         // 64-bit length + ptr
         Type::Array(_) | Type::String => module.isa().pointer_bytes() as u32 + 8,
         _ => todo!(
-            "type_size for {:?} ({:?}) with node id {}",
+            "type_size for {:?} ({:?}) with node id {} at {:?}",
             &semantic.types[id],
             // semantic.parser.debug(id),
             semantic.parser.nodes[id],
             id,
+            semantic.parser.ranges[id]
         ),
     }
 }

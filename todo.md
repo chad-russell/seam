@@ -2,7 +2,6 @@
 
 ## Definitely Implement
 
-- [ ] while
 - [ ] finish println
 - [ ] routine to push token from a macro
 - [ ] debugging
