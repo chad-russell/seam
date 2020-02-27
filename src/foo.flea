@@ -1,5 +1,4 @@
 extern print_string(len: i64, ptr: *i8) i64;
-extern print_newline() i64;
 
 fn print_str(s: *string) i64 {
     print_string(s.len, s.ptr);
@@ -146,6 +145,8 @@ fn ty_size(ty: *Ty) i64 {
 }
 
 fn main() i64 {
+    print(&"newline\ntest");
+
     return old_tests();
 }
 
@@ -166,26 +167,24 @@ fn print<T: Type>(val: *T) i64 {
 fn print_any(any: *Any) i64 {
     let tag = enum_tag(&any.ty);
 
-    let v = any.val;
-
     if tag == 0 {
         // i8
-        let casted_i8: *i8 = #cast v;
+        let casted_i8: *i8 = #cast any.val;
         print_i8(^casted_i8);
     }
     if tag == 1 {
         // i16
-        let casted_i16: *i16 = #cast v;
+        let casted_i16: *i16 = #cast any.val;
         print_i16(^casted_i16);
     }
     if tag == 2 {
         // i32
-        let casted_i32: *i32 = #cast v;
+        let casted_i32: *i32 = #cast any.val;
         print_i32(^casted_i32);
     }
     if tag == 3 {
         // i64
-        let casted_i64: *i64 = #cast v;
+        let casted_i64: *i64 = #cast any.val;
         print_i64(^casted_i64);
     }
     if tag == 4 {
@@ -198,7 +197,7 @@ fn print_any(any: *Any) i64 {
     }
     if tag == 6 {
         // string
-        print_str(#cast v);
+        print_str(#cast any.val);
     }
     if tag == 7 {
         // pointer
@@ -221,8 +220,7 @@ fn print_any(any: *Any) i64 {
     }
     if tag == 9 {
         // struct
-        let bytes_struct: struct{ len: i64, data: *i8 } = { len: 0, ptr: any.val };
-        let bytes: []i8 = #cast bytes_struct;
+        let bytes: []i8 = #cast { len: 0i64, ptr: any.val };
 
         let field_index = 0;
         let field_offset = 0;
@@ -247,8 +245,7 @@ fn print_any(any: *Any) i64 {
         let field_ty = any.ty.Enum[enum_tag].ty;
         let field_name = &any.ty.Enum[enum_tag].name;
 
-        let bytes_struct: struct{ len: i64, data: *i8 } = { len: 0, ptr: any.val };
-        let bytes: []i8 = #cast bytes_struct;
+        let bytes: []i8 = #cast { len: 0i64, ptr: any.val };
 
         print_str(&"{ ");
         print_str(field_name);
@@ -266,8 +263,7 @@ fn print_any(any: *Any) i64 {
 
 // todo(chad): HACK
 fn promote_to_i64<T: Type>(n: T) i64 {
-    let val: i64 = 0;
-    let ptr: *T = #cast &val;
+    let ptr: *T = #cast &0i64;
     ^ptr = n;
     return val;
 }
@@ -316,7 +312,7 @@ fn check<T: Type>(v1: T, v2: T) i64 {
         print(&v1);
         print(&", got ");
         print(&v2);
-        print_newline();
+        print(&"\n");
     }
 
     return 0;

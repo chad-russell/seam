@@ -140,6 +140,17 @@ impl Into<Type> for BasicType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NumericSpecification {
+    None,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Token {
     LParen,
     RParen,
@@ -186,10 +197,10 @@ pub enum Token {
     Caret,
     Uninit,
     Symbol(Sym),
-    IntegerLiteral(i64), // TODO: handle negative literals
-    FloatLiteral(f64),   // TODO: handle negative literals
+    IntegerLiteral(i64, NumericSpecification), // TODO: handle negative literals
+    FloatLiteral(f64),                         // TODO: handle negative literals
     StringLiteral(Sym),
-    EOF,
+    Eof,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -258,8 +269,8 @@ impl<'a> Lexer<'a> {
             original_source: source,
             source,
             loc: Default::default(),
-            top: Lexeme::new(Token::EOF, Default::default()),
-            second: Lexeme::new(Token::EOF, Default::default()),
+            top: Lexeme::new(Token::Eof, Default::default()),
+            second: Lexeme::new(Token::Eof, Default::default()),
             macro_tokens: None,
         }
     }
@@ -267,8 +278,8 @@ impl<'a> Lexer<'a> {
     pub fn update_source_for_copy(&mut self, source: &'a str, loc: Location) {
         self.source = source;
         self.loc = loc;
-        self.top = Lexeme::new(Token::EOF, Default::default());
-        self.second = Lexeme::new(Token::EOF, Default::default());
+        self.top = Lexeme::new(Token::Eof, Default::default());
+        self.second = Lexeme::new(Token::Eof, Default::default());
 
         self.pop();
         self.pop();
@@ -367,7 +378,7 @@ impl<'a> Lexer<'a> {
             self.second = macro_tokens
                 .first()
                 .cloned()
-                .unwrap_or_else(|| Lexeme::new(Token::EOF, Range::default()));
+                .unwrap_or_else(|| Lexeme::new(Token::Eof, Range::default()));
 
             if !macro_tokens.is_empty() {
                 macro_tokens.remove(0);
@@ -548,6 +559,7 @@ impl<'a> Lexer<'a> {
                 };
 
                 let s = String::from(&self.source[0..index]);
+                let s = s.replace("\\n", "\n");
                 let s = self.string_interner.get_or_intern(s);
 
                 self.eat(index + 1);
@@ -589,8 +601,24 @@ impl<'a> Lexer<'a> {
                     let end = self.loc;
                     Lexeme::new(Token::FloatLiteral(digit), Range::new(start, end))
                 } else {
+                    let mut spec = NumericSpecification::None;
+
+                    if self.source.starts_with("i8") {
+                        spec = NumericSpecification::I8;
+                        self.eat(2);
+                    } else if self.source.starts_with("i16") {
+                        spec = NumericSpecification::I16;
+                        self.eat(3);
+                    } else if self.source.starts_with("i32") {
+                        spec = NumericSpecification::I32;
+                        self.eat(3);
+                    } else if self.source.starts_with("i64") {
+                        spec = NumericSpecification::I64;
+                        self.eat(3);
+                    }
+
                     let end = self.loc;
-                    Lexeme::new(Token::IntegerLiteral(digit), Range::new(start, end))
+                    Lexeme::new(Token::IntegerLiteral(digit, spec), Range::new(start, end))
                 }
             }
             Some(_) => {
@@ -600,7 +628,7 @@ impl<'a> Lexer<'a> {
                 };
 
                 if index == 0 {
-                    Lexeme::new(Token::EOF, Default::default())
+                    Lexeme::new(Token::Eof, Default::default())
                 } else {
                     let sym = self.string_interner.get_or_intern(&self.source[..index]);
                     self.eat(index);
@@ -610,7 +638,7 @@ impl<'a> Lexer<'a> {
                     Lexeme::new(Token::Symbol(sym), Range::new(start, end))
                 }
             }
-            None => Lexeme::new(Token::EOF, Default::default()),
+            None => Lexeme::new(Token::Eof, Default::default()),
         };
     }
 }
@@ -653,7 +681,6 @@ pub struct Parser<'a> {
 
     pub returns: Vec<Id>,
     pub string_literals: Vec<Id>,
-    pub string_literal_offset: usize,
 
     pub is_in_insert: bool,
     pub current_unquote: IdVec,
@@ -724,7 +751,7 @@ impl CompileError {
 #[derive(Debug, Clone, Copy)]
 pub enum Node {
     Symbol(Sym),
-    IntLiteral(i64),
+    IntLiteral(i64, NumericSpecification),
     FloatLiteral(f64),
     BoolLiteral(bool),
     StringLiteral {
@@ -907,7 +934,6 @@ impl<'a> Parser<'a> {
             function_by_macro_call: Default::default(),
             macro_calls_by_function: Default::default(),
             string_literals: Default::default(),
-            string_literal_offset: 0,
             current_unquote: IdVec(0),
             parsed_unquotes: Default::default(),
             is_in_insert: false,
@@ -923,7 +949,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self) -> Result<(), CompileError> {
-        while self.lexer.top.tok != Token::EOF {
+        while self.lexer.top.tok != Token::Eof {
             let top_level = self.parse_top_level()?;
             self.top_level.push(top_level);
         }
@@ -1139,10 +1165,10 @@ impl<'a> Parser<'a> {
 
     fn parse_numeric_literal(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok {
-            Token::IntegerLiteral(i) => {
+            Token::IntegerLiteral(i, s) => {
                 let range = self.lexer.top.range;
                 self.lexer.pop();
-                Ok(self.push_node(range, Node::IntLiteral(i)))
+                Ok(self.push_node(range, Node::IntLiteral(i, s)))
             }
             Token::FloatLiteral(f) => {
                 let range = self.lexer.top.range;
@@ -1260,7 +1286,7 @@ impl<'a> Parser<'a> {
                     operators.push(self.lexer.top.tok);
                     self.lexer.pop();
                 }
-                Token::IntegerLiteral(_)
+                Token::IntegerLiteral(_, _)
                 | Token::FloatLiteral(_)
                 | Token::StringLiteral(_)
                 | Token::Ampersand
@@ -1380,7 +1406,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_expression_piece(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok {
-            Token::IntegerLiteral(_) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
+            Token::IntegerLiteral(_, _) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
             Token::StringLiteral(sym) => {
                 let range = self.lexer.top.range;
                 self.lexer.pop();
@@ -1394,7 +1420,6 @@ impl<'a> Parser<'a> {
                     .len();
 
                 let string_id = self.push_node(range, Node::StringLiteral { sym, bytes });
-                self.string_literal_offset += bytes;
                 self.string_literals.push(string_id);
 
                 // structs are always addressable (for now)

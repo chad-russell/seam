@@ -1,4 +1,4 @@
-use crate::parser::{BasicType, CompileError, Id, IdVec, Node, Parser, Type};
+use crate::parser::{BasicType, CompileError, Id, IdVec, Node, NumericSpecification, Parser, Type};
 
 type Sym = usize;
 
@@ -128,8 +128,30 @@ impl<'a> Semantic<'a> {
                 self.parser.node_is_addressable[id] = self.parser.node_is_addressable[resolved];
                 Ok(())
             }
-            Node::IntLiteral(_) => {
-                self.types[id] = Type::Basic(BasicType::IntLiteral);
+            Node::IntLiteral(_, spec) => {
+                match spec {
+                    NumericSpecification::None => {
+                        self.types[id] = Type::Basic(BasicType::IntLiteral);
+                    }
+                    NumericSpecification::I8 => {
+                        self.types[id] = Type::Basic(BasicType::I8);
+                    }
+                    NumericSpecification::I16 => {
+                        self.types[id] = Type::Basic(BasicType::I16);
+                    }
+                    NumericSpecification::I32 => {
+                        self.types[id] = Type::Basic(BasicType::I32);
+                    }
+                    NumericSpecification::I64 => {
+                        self.types[id] = Type::Basic(BasicType::I64);
+                    }
+                    NumericSpecification::F32 => {
+                        self.types[id] = Type::Basic(BasicType::F32);
+                    }
+                    NumericSpecification::F64 => {
+                        self.types[id] = Type::Basic(BasicType::F64);
+                    }
+                }
                 Ok(())
             }
             Node::FloatLiteral(_) => {
@@ -897,7 +919,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_struct(&mut self, id: Id) -> Id {
-        println!("copying struct!");
+        // println!("copying struct!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -918,7 +940,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_enum(&mut self, id: Id) -> Id {
-        println!("copying enum!");
+        // println!("copying enum!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -940,10 +962,10 @@ impl<'a> Semantic<'a> {
 
     #[allow(dead_code)]
     pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
-        println!("deep copying stmt!");
+        // println!("deep copying stmt!");
 
         let is_expr = match &self.parser.nodes[id] {
-            Node::IntLiteral(_) => true,
+            Node::IntLiteral(_, _) => true,
             Node::BoolLiteral(_) => true,
             Node::FloatLiteral(_) => true,
             Node::Symbol(_) => true,

@@ -105,7 +105,6 @@ impl<'a, 'b> Backend<'a, 'b> {
             jit_builder.symbol("print_i32", print_i32 as *const u8);
             jit_builder.symbol("print_i64", print_i64 as *const u8);
             jit_builder.symbol("print_string", print_string as *const u8);
-            jit_builder.symbol("print_newline", print_newline as *const u8);
             // for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
             //     jit_builder.symbol(self.resolve_symbol(name), ptr.0);
             // }
@@ -481,10 +480,10 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let func = self.module.get_finalized_function(func);
                 FUNC_PTRS.lock().unwrap().insert(func_sym, FuncPtr(func));
 
-                let elapsed = now.elapsed().as_micros();
-                if copied_from.is_some() {
-                    println!("compiled copied fn in {} millis", elapsed as f64 / 1000.0);
-                }
+                // let elapsed = now.elapsed().as_micros();
+                // if copied_from.is_some() {
+                //     println!("compiled copied fn in {} millis", elapsed as f64 / 1000.0);
+                // }
 
                 Ok(())
             }
@@ -521,8 +520,8 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 self.semantic.parser.lexer.macro_tokens = Some(tokens);
                 self.semantic.parser.top_scope = self.semantic.parser.node_scopes[id];
-                self.semantic.parser.lexer.top = Lexeme::new(Token::EOF, Range::default());
-                self.semantic.parser.lexer.second = Lexeme::new(Token::EOF, Range::default());
+                self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Range::default());
+                self.semantic.parser.lexer.second = Lexeme::new(Token::Eof, Range::default());
                 self.semantic.parser.lexer.pop();
                 self.semantic.parser.lexer.pop();
 
@@ -892,7 +891,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
-            Node::IntLiteral(i) => {
+            Node::IntLiteral(i, _) => {
                 let value = match self.backend.semantic.types[id] {
                     Type::Basic(bt) => match bt {
                         BasicType::I64 => self.builder.ins().iconst(types::I64, i),
@@ -2016,7 +2015,7 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         Type::Tokens => 8,
         Type::Pointer(_) => module.isa().pointer_bytes() as _,
         Type::Func { .. } => module.isa().pointer_bytes() as _,
-        Type::Struct { params, .. } => semantic
+        Type::Struct { params, .. } | Type::StructLiteral(params) => semantic
             .parser
             .id_vec(*params)
             .iter()
@@ -2121,8 +2120,4 @@ fn print_string(len: i64, bytes: *mut u8) {
     let s = unsafe { String::from_raw_parts(bytes, len as usize, len as usize) };
     print!("{}", s);
     std::mem::forget(s);
-}
-
-fn print_newline() {
-    println!();
 }

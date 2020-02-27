@@ -2,8 +2,6 @@
 
 ## Definitely Implement
 
-- [ ] `\n` in string literal for escaping
-- [ ] specification prefixes on integers (i.e. 0i64, 0i32, etc).
 - [ ] routine to push token from a macro
 - [ ] `else if`
 - [ ] f32/f64
@@ -19,6 +17,14 @@
 - [ ] structs as function parameters / return values
 - [ ] annotation for functions to follow C ABI
 - [ ] unsigned integers
+
+## Optimization
+
+- [ ] Instead of deep-copying the whole function, deep-copy only the signature (ct-params & params) of polymorphic functions. Basically copy as if the function had no body
+      Then, when doing semantic analysis see if we can completely specialize the function with no body.
+      - If yes, then see if there's already an entry. 
+        - If there is we are done, else see next line
+      - If no, then copy the body, then do codegen and see if there's an entry
 
 ## Maybe Implement
 

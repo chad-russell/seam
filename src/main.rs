@@ -12,7 +12,7 @@ fn main() -> Result<(), CompileError> {
     let source = std::fs::read_to_string("src/foo.flea").unwrap();
 
     let mut semantic = Backend::bootstrap_to_semantic(&source)?;
-    let mut backend = Backend::bootstrap_to_backend(&mut semantic)?;
+    let backend = Backend::bootstrap_to_backend(&mut semantic)?;
 
     // println!("**** RUNTIME ****");
     // let now = std::time::Instant::now();
