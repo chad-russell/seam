@@ -1,4 +1,6 @@
-use crate::parser::{BasicType, CompileError, Id, IdVec, Lexeme, Node, Parser, Range, Token, Type};
+use crate::parser::{
+    BasicType, CompileError, Id, IdVec, Lexeme, Location, Node, Parser, Range, Token, Type,
+};
 use crate::semantic::Semantic;
 
 use cranelift::codegen::ir::{
@@ -88,6 +90,7 @@ pub struct Backend<'a, 'b> {
     pub values: Vec<Value>,
     pub funcs: BTreeMap<Sym, FuncId>,
     pub func_sigs: BTreeMap<Sym, Signature>,
+    pub generation: u32,
 }
 
 impl<'a, 'b> Backend<'a, 'b> {
@@ -119,19 +122,25 @@ impl<'a, 'b> Backend<'a, 'b> {
             values: vec![Value::Unassigned; len],
             funcs: BTreeMap::new(),
             func_sigs: BTreeMap::new(),
+            generation: 0,
         }
     }
 
     #[allow(dead_code)]
-    pub fn update_source(&mut self, source: &'b str) -> Result<(), CompileError> {
-        self.semantic.parser.top_level.clear();
-        self.semantic.parser.top_level_map.clear();
-        self.semantic.parser.nodes.clear();
-        self.semantic.parser.node_scopes.clear();
-        self.semantic.parser.ranges.clear();
-        self.semantic.parser.scopes.clear();
+    pub fn update_source_at_top_level(
+        &mut self,
+        source: &'b str,
+        loc: Location,
+    ) -> Result<(), CompileError> {
+        self.generation += 1;
 
-        self.semantic.parser.lexer.update_source(source);
+        self.semantic.parser.top_scope = 0;
+        self.semantic.parser.function_scopes.clear();
+
+        self.semantic
+            .parser
+            .lexer
+            .update_source_for_copy(source, loc);
 
         self.semantic.parser.parse()?;
 
@@ -286,31 +295,32 @@ impl<'a, 'b> Backend<'a, 'b> {
         Ok(backend)
     }
 
-    // pub fn recompile_function(&mut self, function: impl Into<String>) -> Result<(), CompileError> {
-    //     self.values.clear();
-    //     while self.values.len() < self.semantic.parser.nodes.len() {
-    //         self.values.push(Value::Unassigned);
-    //     }
+    #[allow(dead_code)]
+    pub fn recompile_function(&mut self, function: impl Into<String>) -> Result<(), CompileError> {
+        self.values.clear();
+        while self.values.len() < self.semantic.parser.nodes.len() {
+            self.values.push(Value::Unassigned);
+        }
 
-    //     // Replace all top-level function values with FuncRefs
-    //     let new_id = self.semantic.parser.get_top_level(function).unwrap();
-    //     for topo in self.semantic.topo.clone() {
-    //         if topo == new_id {
-    //             continue;
-    //         }
+        // Replace all top-level function values with FuncRefs
+        let new_id = self.semantic.parser.get_top_level(function).unwrap();
+        for topo in self.semantic.topo.clone() {
+            if topo == new_id {
+                continue;
+            }
 
-    //         match self.semantic.parser.nodes[topo] {
-    //             Node::Func { name, .. } => {
-    //                 self.values[topo] = Value::FuncSym(name);
-    //             }
-    //             _ => {}
-    //         };
-    //     }
+            match self.semantic.parser.nodes[topo] {
+                Node::Func { name, .. } => {
+                    self.values[topo] = Value::FuncSym(name);
+                }
+                _ => {}
+            };
+        }
 
-    //     self.compile_id(new_id)?;
+        self.compile_id(new_id)?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     pub fn resolve_symbol(&self, sym: Sym) -> String {
         self.semantic
@@ -373,17 +383,10 @@ impl<'a, 'b> Backend<'a, 'b> {
                 return_ty, // Id,
                 stmts,     // IdVec,
                 is_macro,
+                copied_from,
                 ..
             } => {
-                self.funcs.clear();
-                for (name, sig) in self.func_sigs.iter() {
-                    self.funcs.insert(
-                        name.clone(),
-                        self.module
-                            .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
-                            .unwrap(),
-                    );
-                }
+                let now = std::time::Instant::now();
 
                 let mut ctx = self.module.make_context();
 
@@ -393,6 +396,9 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.values[id] = Value::FuncSym(func_sym);
 
                 // println!("compiling func {}", func_name);
+                // if let Some(copied_from) = copied_from {
+                //     println!("compiling func {}, copied from {}", func_name, copied_from);
+                // }
 
                 let mut sig = self.module.make_signature();
 
@@ -417,7 +423,11 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 let func = self
                     .module
-                    .declare_function(&func_name, Linkage::Local, &ctx.func.signature)
+                    .declare_function(
+                        &format!("{}_{}", func_name, self.generation),
+                        Linkage::Local,
+                        &ctx.func.signature,
+                    )
                     .unwrap();
                 ctx.func.name = ExternalName::user(0, func.as_u32());
 
@@ -470,6 +480,11 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 let func = self.module.get_finalized_function(func);
                 FUNC_PTRS.lock().unwrap().insert(func_sym, FuncPtr(func));
+
+                let elapsed = now.elapsed().as_micros();
+                if copied_from.is_some() {
+                    println!("compiled copied fn in {} millis", elapsed as f64 / 1000.0);
+                }
 
                 Ok(())
             }
@@ -1012,6 +1027,20 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 // todo(chad): store if necessary
                 Ok(())
             }
+            Node::Neq(lhs, rhs) => {
+                self.compile_id(lhs)?;
+                self.compile_id(rhs)?;
+
+                let lhs = self.rvalue(lhs);
+                let rhs = self.rvalue(rhs);
+
+                // todo(chad): @Optimization utilize the `br_icmp` instruction in cranelift for the `if a == b` or `if a != b` case
+                let value = self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs);
+                self.set_value(id, value);
+
+                // todo(chad): store if necessary
+                Ok(())
+            }
             Node::LessThan(lhs, rhs) => {
                 self.compile_id(lhs)?;
                 self.compile_id(rhs)?;
@@ -1386,7 +1415,12 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 };
 
                 // field access on a string
-                if self.backend.semantic.types[unpointered_ty] == Type::String {
+                let is_array_like_ty = match self.backend.semantic.types[unpointered_ty] {
+                    Type::String | Type::Array(_) => true,
+                    _ => false,
+                };
+
+                if is_array_like_ty {
                     let field_name = String::from(
                         self.backend
                             .semantic
@@ -1403,7 +1437,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                     match field_name.as_str() {
                         "len" => (),
-                        "buf" => {
+                        "ptr" => {
                             base = self.builder.ins().iadd_imm(base, 8);
                         }
                         _ => unreachable!(),

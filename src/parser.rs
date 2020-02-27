@@ -147,7 +147,8 @@ pub enum Token {
     RCurly,
     LSquare,
     RSquare,
-    Turbofish,
+    DoubleLAngle,
+    DoubleRAngle,
     LAngle,
     RAngle,
     Semicolon,
@@ -156,6 +157,7 @@ pub enum Token {
     Dot,
     Asterisk,
     EqEq,
+    Neq,
     Add,
     Sub,
     Mul,
@@ -260,18 +262,6 @@ impl<'a> Lexer<'a> {
             second: Lexeme::new(Token::EOF, Default::default()),
             macro_tokens: None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn update_source(&mut self, source: &'a str) {
-        self.original_source = source;
-        self.source = source;
-        self.loc = Default::default();
-        self.top = Lexeme::new(Token::EOF, Default::default());
-        self.second = Lexeme::new(Token::EOF, Default::default());
-
-        self.pop();
-        self.pop();
     }
 
     pub fn update_source_for_copy(&mut self, source: &'a str, loc: Location) {
@@ -491,7 +481,10 @@ impl<'a> Lexer<'a> {
         if self.prefix("]", Token::RSquare) {
             return;
         }
-        if self.prefix("::<", Token::Turbofish) {
+        if self.prefix("<<", Token::DoubleLAngle) {
+            return;
+        }
+        if self.prefix(">>", Token::DoubleRAngle) {
             return;
         }
         if self.prefix("<", Token::LAngle) {
@@ -519,6 +512,9 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix(":", Token::Colon) {
+            return;
+        }
+        if self.prefix("!=", Token::Neq) {
             return;
         }
         if self.prefix("!", Token::Bang) {
@@ -777,6 +773,7 @@ pub enum Node {
         stmts: IdVec,
         returns: IdVec,
         is_macro: bool,
+        copied_from: Option<Id>,
     },
     Extern {
         name: Sym,
@@ -829,6 +826,7 @@ pub enum Node {
     TypeOf(Id),
     Cast(Id),
     EqEq(Id, Id),
+    Neq(Id, Id),
     Add(Id, Id),
     Sub(Id, Id),
     Mul(Id, Id),
@@ -950,10 +948,16 @@ impl<'a> Parser<'a> {
     pub fn scope_get_with_scope_id(&self, sym: Sym, scope: Id) -> Option<Id> {
         match self.scopes[scope].entries.get(&sym).copied() {
             Some(id) => Some(id),
-            None => match self.scopes[scope].parent {
-                Some(parent) => self.scope_get_with_scope_id(sym, parent),
-                None => None,
-            },
+            None => {
+                if scope != 0 {
+                    match self.scopes[scope].parent {
+                        Some(parent) => self.scope_get_with_scope_id(sym, parent),
+                        None => None,
+                    }
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -1241,6 +1245,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.lexer.top.tok {
                 Token::EqEq
+                | Token::Neq
                 | Token::Add
                 | Token::Sub
                 | Token::Mul
@@ -1308,6 +1313,14 @@ impl<'a> Parser<'a> {
                 let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
 
                 Ok(self.push_node(range, Node::EqEq(lhs, rhs)))
+            }
+            Shunting::Operator(Token::Neq) => {
+                output.pop();
+                let rhs = output.pop().unwrap().as_id();
+                let lhs = output.pop().unwrap().as_id();
+                let range = Range::spanning(self.ranges[lhs], self.ranges[rhs]);
+
+                Ok(self.push_node(range, Node::Neq(lhs, rhs)))
             }
             Shunting::Operator(Token::Add) => {
                 output.pop();
@@ -1471,7 +1484,7 @@ impl<'a> Parser<'a> {
                 while self.lexer.top.tok == Token::Dot
                     || self.lexer.top.tok == Token::LParen
                     || self.lexer.top.tok == Token::LSquare
-                    || self.lexer.top.tok == Token::Turbofish
+                    || self.lexer.top.tok == Token::DoubleLAngle
                     || self.lexer.top.tok == Token::Bang
                 {
                     if self.lexer.top.tok == Token::Dot {
@@ -1495,13 +1508,13 @@ impl<'a> Parser<'a> {
 
                         // all field accesses represent addressable memory
                         self.node_is_addressable[value] = true;
-                    } else if self.lexer.top.tok == Token::Turbofish
+                    } else if self.lexer.top.tok == Token::DoubleLAngle
                         || self.lexer.top.tok == Token::LParen
                     {
-                        let ct_params = if self.lexer.top.tok == Token::Turbofish {
+                        let ct_params = if self.lexer.top.tok == Token::DoubleLAngle {
                             self.lexer.pop(); // `::<`
                             let params = self.parse_value_params(true)?;
-                            self.expect(&Token::RAngle)?;
+                            self.expect(&Token::DoubleRAngle)?;
                             Some(params)
                         } else {
                             None
@@ -1723,6 +1736,9 @@ impl<'a> Parser<'a> {
 
     fn pop_scope(&mut self, pushed: PushedScope) {
         self.top_scope = pushed.0;
+        if pushed.1 {
+            self.function_scopes.pop();
+        }
     }
 
     fn expect(&mut self, tok: &Token) -> Result<(), CompileError> {
@@ -1827,6 +1843,7 @@ impl<'a> Parser<'a> {
         while self.lexer.top.tok != Token::RParen
             && self.lexer.top.tok != Token::RCurly
             && self.lexer.top.tok != Token::RAngle
+            && self.lexer.top.tok != Token::DoubleRAngle
         {
             params.push(self.parse_value_param(vp_index, is_ct)?);
             vp_index += 1;
@@ -1899,6 +1916,7 @@ impl<'a> Parser<'a> {
                 stmts,
                 returns,
                 is_macro,
+                copied_from: None,
             },
         );
 

@@ -2,7 +2,7 @@ extern print_string(len: i64, ptr: *i8) i64;
 extern print_newline() i64;
 
 fn print_str(s: *string) i64 {
-    print_string(s.len, s.buf);
+    print_string(s.len, s.ptr);
     return 0;
 }
 
@@ -15,42 +15,42 @@ extern print_i16(i: i16) i64;
 extern print_i32(i: i32) i64;
 extern print_i64(i: i64) i64;
 
-// enum Token {
-//     LParen: struct{},
-//     RParen: struct{},
-//     LCurly: struct{},
-//     RCurly: struct{},
-//     LSquare: struct{},
-//     RSquare: struct{},
-//     Semicolon: struct{},
-//     Colon: struct{},
-//     Bang: struct{},
-//     Backslash: struct{},
-//     Dot: struct{},
-//     Asterisk: struct{},
-//     Eq: struct{},
-//     Comma: struct{},
-//     Struct: struct{},
-//     Enum: struct{},
-//     Fn: struct{},
-//     Extern: struct{},
-//     If: struct{},
-//     Else: struct{},
-//     True: struct{},
-//     False: struct{},
-//     I8: struct{},
-//     I16: struct{},
-//     I32: struct{},
-//     I64: struct{},
-//     Ampersand: struct{},
-//     Type_: struct{},
-//     Caret: struct{},
-//     Uninit: struct{},
-//     Symbol: string,
-//     IntegerLiteral: i64,
-//     FloatLiteral: f64,
-//     StringLiteral: string,
-// }
+enum Token {
+    LParen: struct{},
+    RParen: struct{},
+    LCurly: struct{},
+    RCurly: struct{},
+    LSquare: struct{},
+    RSquare: struct{},
+    Semicolon: struct{},
+    Colon: struct{},
+    Bang: struct{},
+    Backslash: struct{},
+    Dot: struct{},
+    Asterisk: struct{},
+    Eq: struct{},
+    Comma: struct{},
+    Struct: struct{},
+    Enum: struct{},
+    Fn: struct{},
+    Extern: struct{},
+    If: struct{},
+    Else: struct{},
+    True: struct{},
+    False: struct{},
+    I8: struct{},
+    I16: struct{},
+    I32: struct{},
+    I64: struct{},
+    Ampersand: struct{},
+    Type_: struct{},
+    Caret: struct{},
+    Uninit: struct{},
+    Symbol: string,
+    IntegerLiteral: i64,
+    FloatLiteral: f64,
+    StringLiteral: string,
+}
 
 enum Ty {
     I8: struct{},
@@ -64,15 +64,15 @@ enum Ty {
     Array: *Ty,
     Struct: []struct {
         name: string,
-        type: *Ty,
+        ty: *Ty,
     },
     Enum: []struct {
         name: string,
-        type: *Ty,
+        ty: *Ty,
     },
     Func: struct {
         input_types: []Ty,
-        return_type: *Ty,
+        return_ty: *Ty,
     },
 }
 
@@ -118,21 +118,17 @@ fn ty_size(ty: *Ty) i64 {
     }
     if tag == 9 {
         // struct
-        let casted_array: *struct{ len: i64 } = #cast &ty.Struct;
-
         let field_index = 0;
-        while field_index < casted_array.len {
-            size = size + ty_size(ty.Struct[field_index].type);
+        while field_index < ty.Struct.len {
+            size = size + ty_size(ty.Struct[field_index].ty);
             field_index = field_index + 1;
         }
     }
     if tag == 10 {
         // enum
-        let casted_array: *struct{ len: i64 } = #cast &ty.Struct;
-
         let field_index = 0;
-        while field_index < casted_array.len {
-            let maybe_new_size = ty_size(ty.Struct[field_index].type);
+        while field_index < ty.Struct.len {
+            let maybe_new_size = ty_size(ty.Struct[field_index].ty);
             if maybe_new_size > size {
                 size = maybe_new_size;
             }
@@ -150,49 +146,7 @@ fn ty_size(ty: *Ty) i64 {
 }
 
 fn main() i64 {
-    // let t: Ty = {
-    //     Struct: []{
-    //         { 
-    //             name: "foo", 
-    //             type: { I64: {} } 
-    //         },
-    //         { 
-    //             name: "bar", 
-    //             type: { 
-    //                 Struct: []{
-    //                     { name: "e0", type: { I64: {} } },
-    //                     { name: "e1", type: { I64: {} } }
-    //                 } 
-    //             }
-    //         }
-    //     }
-    // };
-    // print_str(&t.Struct[1].type.Struct[1].name);
-
-    // let n64: i64 = 18;
-    // println(&n64);
-
-    // let n32: i32 = 12;
-    // println(&n32);
-
-    // let st: *struct{a: i64, b: i32, c: string} = &{a: 13, b: 14, c: "hello"};
-    // println(st);
-
-    // let rec: Rec = ---;
-    // let ty: Ty = #type_of(rec);
-
-    // let casted_tag: *struct{ tag: i16 } = #cast ty.Struct[0].type;
-    // print_i16(casted_tag.tag);
-    // print_str(&ty.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].type.Pointer.Struct[0].name);
-
-    let s: struct { i: i64, j: struct { x: i64, y: i64 } } = { i: 10, j: { x: 2, y: 3 } };
-    // let a: Any = { ty: #type_of(s), val: #cast &s };
-    // println(&a);
-
-    let ty: Ty = ---;
-    print_i64(ty_size(&#type_of(ty)));
-
-    return 0;
+    return old_tests();
 }
 
 fn enum_tag<T: Type>(e: *T) i16 {
@@ -205,279 +159,346 @@ struct Any {
     val: *i8,
 }
 
-fn println(any: *Any) i16 {
-    let casted_tag: *struct { tag: i16 } = #cast &any.ty;
-    let tag = casted_tag.tag;
+fn print<T: Type>(val: *T) i64 {
+    return print_any(&{ ty: #type_of(^val), val: #cast val });
+}
+
+fn print_any(any: *Any) i64 {
+    let tag = enum_tag(&any.ty);
 
     let v = any.val;
 
     if tag == 0 {
+        // i8
         let casted_i8: *i8 = #cast v;
         print_i8(^casted_i8);
     }
     if tag == 1 {
+        // i16
         let casted_i16: *i16 = #cast v;
         print_i16(^casted_i16);
     }
     if tag == 2 {
+        // i32
         let casted_i32: *i32 = #cast v;
         print_i32(^casted_i32);
     }
     if tag == 3 {
+        // i64
         let casted_i64: *i64 = #cast v;
         print_i64(^casted_i64);
     }
     if tag == 4 {
+        // f32
         print_str(&"F32");
     }
     if tag == 5 {
+        // f64
         print_str(&"F64");
     }
     if tag == 6 {
-        let casted_string: *string = #cast v;
-        print_str(casted_string);
+        // string
+        print_str(#cast v);
     }
     if tag == 7 {
+        // pointer
         print_str(&"Pointer");
     }
     if tag == 8 {
-        print_str(&"Array");
+        // array
+        print_str(&"[]");
+        let casted_array: []i8 = #cast any.val;
+
+        let element_size = ty_size(any.ty.Array);
+
+        let data_offset = 8; // skip the 'len'
+        let index = 0;
+        while index < casted_array.len {
+            print_any(&{ ty: ^any.ty.Array, val: &casted_array[data_offset] });
+            index = index + 1;
+            data_offset = data_offset + element_size;
+        }
     }
     if tag == 9 {
-        let casted_array: *struct{ len: i64 } = #cast &any.ty.Struct;
-
+        // struct
         let bytes_struct: struct{ len: i64, data: *i8 } = { len: 0, ptr: any.val };
         let bytes: []i8 = #cast bytes_struct;
 
         let field_index = 0;
         let field_offset = 0;
 
-        print_str(&"struct{ ");
-        while field_index < casted_array.len {
-            let field_ty = any.ty.Struct[field_index].type;
+        print_str(&"{ ");
+        while field_index < any.ty.Struct.len {
+            let field_ty = any.ty.Struct[field_index].ty;
             print_str(&any.ty.Struct[field_index].name);
             print_str(&": ");
             field_index = field_index + 1;
-            println(&{ ty: ^field_ty, val: &bytes[field_offset] });
+            print_any(&{ ty: ^field_ty, val: &bytes[field_offset] });
             field_offset = field_offset + ty_size(field_ty);
             print_str(&", ");
         }
         print_str(&"}");
-        print_newline();
     }
     if tag == 10 {
-        print_str(&"Enum");
+        // enum
+        let casted_enum: *struct { tag: i16 } = #cast any.val;
+        let enum_tag = promote_to_i64(casted_enum.tag);
+
+        let field_ty = any.ty.Enum[enum_tag].ty;
+        let field_name = &any.ty.Enum[enum_tag].name;
+
+        let bytes_struct: struct{ len: i64, data: *i8 } = { len: 0, ptr: any.val };
+        let bytes: []i8 = #cast bytes_struct;
+
+        print_str(&"{ ");
+        print_str(field_name);
+        print_str(&": ");
+        print_any(&{ ty: ^field_ty, val: &bytes[2] });
+        print_str(&" }");
     }
     if tag == 11 {
+        // func
         print_str(&"Func");
     }
 
     return 0;
 }
 
-// fn ct<p: struct{val: T}, T: Type>() i64 {
-//     print_i64(p.val);
-//     return 0;
-// }
+// todo(chad): HACK
+fn promote_to_i64<T: Type>(n: T) i64 {
+    let val: i64 = 0;
+    let ptr: *T = #cast &val;
+    ^ptr = n;
+    return val;
+}
 
-// fn test_poly_struct_args() i64 {
-//     let p: Poly = { val: 18 };
-//     ct::<p>();
-//     return 0;
-// }
+fn ct<p: struct{val: T}, T: Type>() i64 {
+    print_i64(p.val);
+    return 0;
+}
 
-// fn old_tests() i64 {
-//     // return poly_call(id, 15);
-//     // return poly_call(poly_id, 99);
-//     // return poly_omg(poly_call, poly_id, 10);
-//     // return test_poly1();
+fn test_poly_struct_args() i64 {
+    let p: Poly = { val: 18 };
+    ct<<p>>();
+    return 0;
+}
 
-//     // return omg(call, id, 10);
-//     // return call(id, 10);
+fn old_tests() i64 {
+    check(poly_call(id, 15), 15);
 
-//     // return test_fn_ptr();
-//     // return cpi_test();
-//     // return baz();
-//     // return bar();
-//     // return test_load_param();
+    let hack: i64 = 99;
+    check(poly_call(poly_id, 99), hack);
 
-//     return 0;
-// }
+    check(poly_omg(poly_call, poly_id, 10), 10);
 
-// struct Point {
-//     x: i64,
-//     y: i64,
-// }
+    check(test_poly1(), 4);
 
-// struct Line {
-//     start: *Point,
-//     end: *Point,
-// }
+    check(omg(call, id, 10), 10);
 
-// struct Foo {
-//     value: i64,
-//     bar: *Bar,
-// }
+    check(call(id, 10), 10);
 
-// struct Bar {
-//     value: i64,
-//     baz: *Baz,
-// }
-
-// struct Baz {
-//     value: i64,
-//     qux: *Qux,
-// }
-
-// struct Qux {
-//     value: **i64,
-// }
-
-// struct Poly<T: Type> {
-//     val: T,
-// }
-
-// struct Poly2 {
-//     val: i64,
-//     p: Poly,
-// }
-
-// fn test_poly1() i64 {
-//     let p: Point = {x: 3, y: 4};
-//     // return get_y(&p);
-//     return poly_get_y(&p);
-// }
-
-// fn test_poly2() i64 {
-//     let a: Poly = { val: 5 };
-//     let b: Poly = { val: true };
-//     return a.val;
-// }
-
-// fn test_poly3() i64 {
-//     let a = poly_id(5);
-//     let b = poly_id(true);
-//     return a;
-// }
-
-// fn get_x(p: *Point) i64 {
-//     let hack_p = p;
-//     return hack_p.x;
-// }
-
-// fn get_y(p: *Point) i64 {
-//     let hack_p = p;
-//     return hack_p.y;
-// }
-
-// fn poly_get_y<T: Type>(p: *T) i64 {
-//     let hack_p = p;
-//     let p2 = ^hack_p;
-//     return p2.y;
-// }
-
-// fn id(n: i64) i64 {
-//     return n;
-// }
-
-// fn poly_id<P: Type>(x: P) P {
-//     return x;
-// }
-
-// fn call(f: fn(n: i64) i64, val: i64) i64 {
-//     return f(val);
-// }
-
-// fn poly_call<T: Type, R: Type>(f: fn(n: T) R, val: T) R {
-//     return f(val);
-// }
-
-// fn omg(g: fn(f1: fn(n1: i64) i64, val1: i64) i64, 
-//        f: fn(n: i64) i64, 
-//        val: i64) i64 {
-//     return g(f, val);
-// }
-
-// fn poly_omg<P: Type>(
-//     g: fn(f1: fn(n1: P) P, val1: P) P, 
-//     f: fn(n: P) P, 
-//     val: P
-// ) P {
-//     return g(f, val);
-// }
-
-// fn test_fn_ptr() i64 {
-//     let f: fn(n: i64) i64 = ---;
-//     f = id;
-//     return f(2);
-// }
-
-// fn cpi_test() i64 {
-//     let foo: Foo = ---;
-//     let bar: Bar = ---;
-//     let baz: Baz = ---;
-//     let qux: Qux = ---;
-
-//     foo.value = 111;
-//     bar.value = 222;
-//     baz.value = 333;
-//     qux.value = &&444;
-
-//     baz.qux = &qux;
-//     bar.baz = &baz;
-//     foo.bar = &bar;
-
-//     ^bar.baz.qux.value = &7;
-
-//     // assert(3 == ^^foo.bar.baz.qux.value);
-//     // assert(3 == ^^bar.baz.qux.value);
-//     // assert(3 == ^^baz.qux.value);
-//     // assert(3 == ^^qux.value);
-
-//     return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
-// }
+    check(test_fn_ptr(), 2);
     
-// fn test_load_param() i64 {
-//     return load_wrapper(&&10);
-// }
+    check(cpi_test(), 7);
 
-// fn load_wrapper(n: **i64) i64 {
-//     return ^^n;
-// }
+    check(baz(), 8);
 
-// fn bar() i64 {
-//     let p: Point = ---;
+    check(bar(), 123);
 
-//     let l2: Line = ---;
-//     l2.start = &p;
+    check(test_load_param(), 10);
 
-//     let l = &l2;
+    return 0;
+}
 
-//     let ppp = &l.start;
-//     let pp = ^ppp;
-//     pp.y = 123;
+fn check<T: Type>(v1: T, v2: T) i64 {
+    if v1 != v2 {
+        print(&"ERROR!!!! wanted ");
+        print(&v1);
+        print(&", got ");
+        print(&v2);
+        print_newline();
+    }
 
-//     // let ppp2 = &l.start;
-//     // (^ppp2).y = 120;
+    return 0;
+}
 
-//     // let ps: *Point = l.start;
-//     // ps.y = 300;
+struct Point {
+    x: i64,
+    y: i64,
+}
 
-//     // l.start.y = 123;
+struct Line {
+    start: *Point,
+    end: *Point,
+}
 
-//     return p.y;
-// }
+struct Foo {
+    value: i64,
+    bar: *Bar,
+}
 
-// fn baz() i64 {
-//     let p: Point = ---;
-//     let pp = &p;
-//     let ppp = &pp;
+struct Bar {
+    value: i64,
+    baz: *Baz,
+}
 
-//     let p2: Point = ---;
-//     p2.x = 3;
-//     p2.y = 8;
-//     let pp2 = &p2;
+struct Baz {
+    value: i64,
+    qux: *Qux,
+}
 
-//     ^^ppp = ^pp2;
-//     return p.y;
-// }
+struct Qux {
+    value: **i64,
+}
+
+struct Poly<T: Type> {
+    val: T,
+}
+
+struct Poly2 {
+    val: i64,
+    p: Poly,
+}
+
+fn test_poly1() i64 {
+    let p: Point = {x: 3, y: 4};
+    // return get_y(&p);
+    return poly_get_y(&p);
+}
+
+fn test_poly2() i64 {
+    let a: Poly = { val: 5 };
+    let b: Poly = { val: true };
+    return a.val;
+}
+
+fn test_poly3() i64 {
+    let a = poly_id(5);
+    let b = poly_id(true);
+    return a;
+}
+
+fn get_x(p: *Point) i64 {
+    let hack_p = p;
+    return hack_p.x;
+}
+
+fn get_y(p: *Point) i64 {
+    let hack_p = p;
+    return hack_p.y;
+}
+
+fn poly_get_y<T: Type>(p: *T) i64 {
+    let hack_p = p;
+    let p2 = ^hack_p;
+    return p2.y;
+}
+
+fn id(n: i64) i64 {
+    return n;
+}
+
+fn poly_id<P: Type>(x: P) P {
+    return x;
+}
+
+fn call(f: fn(n: i64) i64, val: i64) i64 {
+    return f(val);
+}
+
+fn poly_call<T: Type, R: Type>(f: fn(n: T) R, val: T) R {
+    return f(val);
+}
+
+fn omg(g: fn(f1: fn(n1: i64) i64, val1: i64) i64, 
+       f: fn(n: i64) i64, 
+       val: i64) i64 {
+    return g(f, val);
+}
+
+fn poly_omg<P: Type>(
+    g: fn(f1: fn(n1: P) P, val1: P) P, 
+    f: fn(n: P) P, 
+    val: P
+) P {
+    return g(f, val);
+}
+
+fn test_fn_ptr() i64 {
+    let f: fn(n: i64) i64 = ---;
+    f = id;
+    return f(2);
+}
+
+fn cpi_test() i64 {
+    let foo: Foo = ---;
+    let bar: Bar = ---;
+    let baz: Baz = ---;
+    let qux: Qux = ---;
+
+    foo.value = 111;
+    bar.value = 222;
+    baz.value = 333;
+    qux.value = &&444;
+
+    baz.qux = &qux;
+    bar.baz = &baz;
+    foo.bar = &bar;
+
+    ^bar.baz.qux.value = &7;
+
+    check(^^foo.bar.baz.qux.value, 7);
+    check(^^bar.baz.qux.value, 7);
+    check(^^baz.qux.value, 7);
+    check(^^qux.value, 7);
+
+    return ^&^^^&&^(^^^&&&foo.bar.baz).qux.value;
+}
+    
+fn test_load_param() i64 {
+    return load_wrapper(&&10);
+}
+
+fn load_wrapper(n: **i64) i64 {
+    return ^^n;
+}
+
+fn bar() i64 {
+    let p: Point = ---;
+
+    let l2: Line = ---;
+    l2.start = &p;
+
+    let l = &l2;
+
+    let ppp = &l.start;
+    let pp = ^ppp;
+    pp.y = 123;
+    check(p.y, 123);
+
+    let ppp2 = &l.start;
+    (^ppp2).y = 120;
+    check(p.y, 120);
+
+    let ps: *Point = l.start;
+    ps.y = 300;
+    check(p.y, 300);
+
+    l.start.y = 123;
+
+    return p.y;
+}
+
+fn baz() i64 {
+    let p: Point = ---;
+    let pp = &p;
+    let ppp = &pp;
+
+    let p2: Point = ---;
+    p2.x = 3;
+    p2.y = 8;
+    let pp2 = &p2;
+
+    ^^ppp = ^pp2;
+    return p.y;
+}

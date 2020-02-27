@@ -242,7 +242,29 @@ impl<'a> Semantic<'a> {
                         "len" => {
                             self.types[id] = Type::Basic(BasicType::I64);
                         }
-                        "buf" => {
+                        "ptr" => {
+                            // todo(chad): maybe make StringPointer its own type or something?
+                            // or have Ids that will always reference basic types
+                            self.types[id] = Type::Type;
+                        }
+                        _ => {
+                            return Err(CompileError::from_string(
+                                "Valid fields on strings are 'len' or 'buf'",
+                                self.parser.ranges[id],
+                            ))
+                        }
+                    }
+
+                    return Ok(());
+                }
+
+                if let Type::Array(_) = self.types[unpointered_ty] {
+                    let field_name = self.parser.resolve_sym_unchecked(field_name);
+                    match field_name {
+                        "len" => {
+                            self.types[id] = Type::Basic(BasicType::I64);
+                        }
+                        "ptr" => {
                             // todo(chad): maybe make StringPointer its own type or something?
                             // or have Ids that will always reference basic types
                             self.types[id] = Type::Type;
@@ -365,7 +387,7 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::EqEq(lhs, rhs) => {
+            Node::EqEq(lhs, rhs) | Node::Neq(lhs, rhs) => {
                 self.assign_type(lhs)?;
                 self.assign_type(rhs)?;
                 self.match_types(lhs, rhs)?;
@@ -391,6 +413,7 @@ impl<'a> Semantic<'a> {
                 stmts,       // IdVec,
                 returns,     // IdVec,
                 is_macro: _, // bool,
+                copied_from: _,
             } => {
                 if let Some(ct_params) = ct_params {
                     for ct_param in self.parser.id_vec(ct_params).clone() {
@@ -473,14 +496,6 @@ impl<'a> Semantic<'a> {
                 self.match_types(id, ret_id)?;
                 Ok(())
             }
-            // Node::While(cond, stmts) => {
-            //     self.assign_type(*cond, Coercion::Basic(BasicType::Bool))?;
-            //     for &stmt in stmts {
-            //         self.assign_type(stmt)?;
-            //     }
-
-            //     Ok(())
-            // }
             Node::Ref(ref_id) => {
                 // todo(chad): coercion
                 self.assign_type(ref_id)?;
@@ -498,7 +513,7 @@ impl<'a> Semantic<'a> {
                         Ok(())
                     }
                     _ => Err(CompileError::from_string(
-                        "Cannot load a non-pointer",
+                        format!("Cannot load a non-pointer {:?}", self.types[load_id]),
                         self.parser.ranges[id],
                     )),
                 }
@@ -743,15 +758,6 @@ impl<'a> Semantic<'a> {
             Node::Enum {
                 ct_params, params, ..
             } => {
-                // for param in self.parser.id_vec(params).clone() {
-                //     self.assign_type(param)?;
-                // }
-                // self.types[id] = Type::Enum {
-                //     params: params.clone(),
-                //     copied_from: None,
-                // };
-                // Ok(())
-
                 // for recursion purposes, give the struct a placeholder type before anything else
                 self.types[id] = Type::Type;
 
@@ -850,7 +856,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_fn(&mut self, id: Id) -> Id {
-        // println!("copying function!");
+        // println!("deep copying function");
 
         let range = self.parser.ranges[id];
         let source =
@@ -874,8 +880,11 @@ impl<'a> Semantic<'a> {
             .string_interner
             .get_or_intern(format!("{}_{}", old_name, copied));
         match self.parser.nodes.get_mut(copied).unwrap() {
-            Node::Func { name, .. } => {
+            Node::Func {
+                name, copied_from, ..
+            } => {
                 *name = new_name;
+                *copied_from = Some(id);
             }
             _ => unreachable!(),
         };
@@ -888,7 +897,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_struct(&mut self, id: Id) -> Id {
-        // println!("copying struct!");
+        println!("copying struct!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -909,7 +918,7 @@ impl<'a> Semantic<'a> {
     }
 
     fn deep_copy_enum(&mut self, id: Id) -> Id {
-        // println!("copying struct!");
+        println!("copying enum!");
 
         let range = self.parser.ranges[id];
         let source =
@@ -931,7 +940,7 @@ impl<'a> Semantic<'a> {
 
     #[allow(dead_code)]
     pub fn deep_copy_stmt(&mut self, scope: Id, id: Id) -> Id {
-        // println!("copying stmt!");
+        println!("deep copying stmt!");
 
         let is_expr = match &self.parser.nodes[id] {
             Node::IntLiteral(_) => true,
