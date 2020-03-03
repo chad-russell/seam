@@ -602,30 +602,12 @@ impl<'a> Semantic<'a> {
             }
             Node::MacroCall {
                 name,
-                params,
+                input,
                 expanded,
             } => {
-                self.assign_type(name)?;
-
-                let given = self.parser.id_vec(params).clone();
-                let decl = match &self.parser.nodes[name] {
-                    Node::Func { params, .. } => params,
-                    Node::Extern { params, .. } => params,
-                    _ => match &self.types[name] {
-                        Type::Func { input_tys, .. } => input_tys,
-                        _ => unreachable!(),
-                    },
-                };
-                let decl = self.parser.id_vec(*decl).clone();
-
-                for (g, d) in given.iter().zip(decl.iter()) {
-                    self.assign_type(*d)?;
-                    self.assign_type(*g)?;
-                    self.match_types(*d, *g)?;
-                }
-
                 self.types[id] = Type::Type;
 
+                self.assign_type(name)?;
                 for stmt in self.parser.id_vec(expanded).clone() {
                     self.assign_type(stmt)?;
                     self.types[id] = self.types[stmt];
@@ -837,9 +819,16 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Tokens(_) => {
+            Node::MakeTokens => {
                 self.types[id] = Type::Tokens;
+                Ok(())
+            }
+            Node::PushToken(tokens, token) => {
+                self.assign_type(tokens)?;
+                self.assign_type(token)?;
 
+                // todo(chad): type checking on arguments
+                self.types[id] = Type::Type;
                 Ok(())
             }
             // _ => Err(CompileError::from_string(
@@ -1161,11 +1150,18 @@ impl<'a> Semantic<'a> {
         let struct_params = self.get_struct_params(st);
         let enum_params = self.get_struct_params(et);
 
-        let st = self.parser.id_vec(st).clone();
-        assert_eq!(st.len(), 1);
+        let cloned_st = self.parser.id_vec(st).clone();
+        assert_eq!(cloned_st.len(), 1);
 
         let (name, (st, _)) = struct_params.iter().next().unwrap();
-        let (et, _) = enum_params.get(name).unwrap();
+        let (et, enum_index) = enum_params.get(name).unwrap();
+
+        match self.parser.nodes.get_mut(cloned_st[0]).unwrap() {
+            Node::ValueParam { index, .. } => {
+                *index = *enum_index;
+            }
+            _ => unreachable!(),
+        }
 
         self.match_types(*st, *et)
     }

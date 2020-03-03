@@ -3,12 +3,17 @@
 ## Definitely Implement
 
 - [ ] routine to push token from a macro
+- [ ] handle empty / no return type
+- [ ] malloc
+- [ ] integer promotions
 - [ ] `else if`
-- [ ] f32/f64
-- [ ] `if let a.b` OR `if let my_rename = a.b`
+- [ ] import other files / modules
+- [ ] switch on enums
+    - [ ] check cases are exhaustive
 - [ ] debugging
-- [ ] check enum tag when accessing through a field
+- [ ] f32/f64
 - [ ] defer
+- [ ] check enum tag when accessing through a field
 - [ ] passing named params out of order, default params, unnamed params for structs
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] if as value expression

@@ -1,5 +1,6 @@
 use crate::parser::{
-    BasicType, CompileError, Id, IdVec, Lexeme, Location, Node, Parser, Range, Token, Type,
+    BasicType, CompileError, Id, IdVec, Lexeme, Location, Node, NumericSpecification, Parser,
+    Range, Token, TokenVec, Type,
 };
 use crate::semantic::Semantic;
 
@@ -100,14 +101,13 @@ impl<'a, 'b> Backend<'a, 'b> {
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
             jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
+            jit_builder.symbol("__make_tokens", make_tokens as *const u8);
+            jit_builder.symbol("__push_token", push_token as *const u8);
             jit_builder.symbol("print_i8", print_i8 as *const u8);
             jit_builder.symbol("print_i16", print_i16 as *const u8);
             jit_builder.symbol("print_i32", print_i32 as *const u8);
             jit_builder.symbol("print_i64", print_i64 as *const u8);
             jit_builder.symbol("print_string", print_string as *const u8);
-            // for (&name, &ptr) in FUNC_PTRS.lock().unwrap().iter() {
-            //     jit_builder.symbol(self.resolve_symbol(name), ptr.0);
-            // }
 
             Module::new(jit_builder)
         };
@@ -348,7 +348,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         //     .map(|k| self.semantic.parser.lexer.resolve_unchecked(*k))
         //     .collect::<Vec<_>>());
         let f: fn() -> i64 = unsafe {
-            std::mem::transmute::<_, fn() -> i64>(
+            std::mem::transmute(
                 (FUNC_PTRS.lock().unwrap())
                     [&self.semantic.parser.lexer.string_interner.get(str).unwrap()],
             )
@@ -382,7 +382,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 return_ty, // Id,
                 stmts,     // IdVec,
                 is_macro,
-                copied_from,
+                copied_from: _,
                 ..
             } => {
                 let now = std::time::Instant::now();
@@ -437,20 +437,50 @@ impl<'a, 'b> Backend<'a, 'b> {
                 builder.append_ebb_params_for_function_params(ebb);
 
                 let dfp_decl = {
-                    let mut dfp_sig = self.module.make_signature();
+                    let mut sig = self.module.make_signature();
 
-                    dfp_sig.params.push(AbiParam::new(types::I64));
-                    dfp_sig
-                        .returns
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.returns
                         .push(AbiParam::new(self.module.isa().pointer_type()));
 
-                    let dfp_func_id = self
+                    let func_id = self
                         .module
-                        .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
+                        .declare_function("__dynamic_fn_ptr", Linkage::Import, &sig)
                         .unwrap();
 
-                    self.module
-                        .declare_func_in_func(dfp_func_id, &mut builder.func)
+                    self.module.declare_func_in_func(func_id, &mut builder.func)
+                };
+
+                let make_tokens_decl = {
+                    let mut sig = self.module.make_signature();
+
+                    sig.params
+                        .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
+                    sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
+
+                    let func_id = self
+                        .module
+                        .declare_function("__make_tokens", Linkage::Import, &sig)
+                        .unwrap();
+
+                    self.module.declare_func_in_func(func_id, &mut builder.func)
+                };
+
+                let push_token_decl = {
+                    let mut sig = self.module.make_signature();
+
+                    sig.params
+                        .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
+                    sig.params.push(AbiParam::new(types::I64)); // unwrapped TokenVec
+                    sig.params
+                        .push(AbiParam::new(self.module.isa().pointer_type())); // *BackendToken
+
+                    let func_id = self
+                        .module
+                        .declare_function("__push_token", Linkage::Import, &sig)
+                        .unwrap();
+
+                    self.module.declare_func_in_func(func_id, &mut builder.func)
                 };
 
                 declare_externs(self, &mut builder)?;
@@ -460,6 +490,8 @@ impl<'a, 'b> Backend<'a, 'b> {
                     builder,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
+                    make_tokens_decl,
+                    push_token_decl,
                     data_map: BTreeMap::new(),
                 };
 
@@ -498,24 +530,25 @@ impl<'a, 'b> Backend<'a, 'b> {
             }
             Node::MacroCall {
                 name,
-                params,
+                input,
                 expanded: _,
             } => {
                 self.values[id] = Value::None;
 
                 self.compile_id(name)?;
 
-                let params = self.semantic.parser.id_vec(params).clone();
+                // let input = self.semantic.parser.token_vec(input).clone();
                 let name = match self.semantic.parser.nodes[name] {
                     Node::Symbol(sym) => sym,
                     _ => unreachable!(),
                 };
 
-                // todo(chad): if the macro is Tokens -> Tokens with no other params, we should NOT build this extra layer
-                let compiled_macro = self.build_hoisted_function(id, params, name)?;
-                let compiled_macro: fn(semantic: *mut Semantic) -> i64 =
-                    unsafe { std::mem::transmute(compiled_macro) };
-                let tokens_id = compiled_macro(self.semantic as *mut _);
+                // let compiled_macro = self.build_hoisted_function(id, params, name)?;
+                // let compiled_macro: fn(semantic: *mut Semantic) -> i64 = unsafe { std::mem::transmute(compiled_macro) };
+                let compiled_macro: fn(i64, *const Semantic) -> i64 =
+                    unsafe { std::mem::transmute((FUNC_PTRS.lock().unwrap())[&name]) };
+
+                let tokens_id = compiled_macro(input.0 as _, self.semantic as *const _);
                 let tokens = self.semantic.parser.token_vecs[tokens_id as usize].clone();
 
                 self.semantic.parser.lexer.macro_tokens = Some(tokens);
@@ -563,127 +596,161 @@ impl<'a, 'b> Backend<'a, 'b> {
         }
     }
 
-    pub fn build_hoisted_function(
-        &mut self,
-        call_id: Id,
-        params: Vec<Id>,
-        hoisting_name: Sym,
-    ) -> Result<*const u8, CompileError> {
-        // println!(
-        //     "compiling hoisting function for {}",
-        //     self.resolve_symbol(hoisting_name)
-        // );
+    // pub fn build_hoisted_function(
+    //     &mut self,
+    //     call_id: Id,
+    //     params: Vec<Id>,
+    //     hoisting_name: Sym,
+    // ) -> Result<*const u8, CompileError> {
+    //     // println!(
+    //     //     "compiling hoisting function for {}",
+    //     //     self.resolve_symbol(hoisting_name)
+    //     // );
 
-        self.funcs.clear();
-        for (name, sig) in self.func_sigs.iter() {
-            self.funcs.insert(
-                name.clone(),
-                self.module
-                    .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
-                    .unwrap(),
-            );
-        }
+    //     self.funcs.clear();
+    //     for (name, sig) in self.func_sigs.iter() {
+    //         self.funcs.insert(
+    //             name.clone(),
+    //             self.module
+    //                 .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
+    //                 .unwrap(),
+    //         );
+    //     }
 
-        let mut ctx = self.module.make_context();
-        let mut sig = self.module.make_signature();
+    //     let mut ctx = self.module.make_context();
+    //     let mut sig = self.module.make_signature();
 
-        // param 0 = ptr to semantic
-        // todo(chad): eventually param 1 = ptr to return value
-        sig.params
-            .push(AbiParam::new(self.module.isa().pointer_type()));
-        sig.returns.push(AbiParam::new(types::I64));
+    //     // param 0 = ptr to semantic
+    //     // todo(chad): eventually param 1 = ptr to return value
+    //     sig.params
+    //         .push(AbiParam::new(self.module.isa().pointer_type()));
+    //     sig.returns.push(AbiParam::new(types::I64));
 
-        ctx.func.signature = sig;
+    //     ctx.func.signature = sig;
 
-        // self
-        //     .func_sigs
-        //     .insert(func_sym, ctx.func.signature.clone());
+    //     // self
+    //     //     .func_sigs
+    //     //     .insert(func_sym, ctx.func.signature.clone());
 
-        let func = self
-            .module
-            .declare_function(
-                &format!("hoist_{}", call_id),
-                Linkage::Local,
-                &ctx.func.signature,
-            )
-            .unwrap();
-        ctx.func.name = ExternalName::user(0, func.as_u32());
+    //     let func = self
+    //         .module
+    //         .declare_function(
+    //             &format!("hoist_{}", call_id),
+    //             Linkage::Local,
+    //             &ctx.func.signature,
+    //         )
+    //         .unwrap();
+    //     ctx.func.name = ExternalName::user(0, func.as_u32());
 
-        let dfp_decl = {
-            let mut dfp_sig = self.module.make_signature();
+    //     let dfp_decl = {
+    //         let mut dfp_sig = self.module.make_signature();
 
-            dfp_sig.params.push(AbiParam::new(types::I64));
-            dfp_sig
-                .returns
-                .push(AbiParam::new(self.module.isa().pointer_type()));
+    //         dfp_sig.params.push(AbiParam::new(types::I64));
+    //         dfp_sig
+    //             .returns
+    //             .push(AbiParam::new(self.module.isa().pointer_type()));
 
-            let dfp_func_id = self
-                .module
-                .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
-                .unwrap();
+    //         let dfp_func_id = self
+    //             .module
+    //             .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
+    //             .unwrap();
 
-            self.module.declare_func_in_func(dfp_func_id, &mut ctx.func)
-        };
+    //         self.module.declare_func_in_func(dfp_func_id, &mut ctx.func)
+    //     };
 
-        let mut func_ctx = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+    //     let make_tokens_decl = {
+    //         let mut sig = self.module.make_signature();
 
-        declare_externs(self, &mut builder)?;
+    //         sig.params
+    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
+    //         sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
 
-        let ebb = builder.create_ebb();
-        builder.switch_to_block(ebb);
-        builder.append_ebb_params_for_function_params(ebb);
+    //         let func_id = self
+    //             .module
+    //             .declare_function("__make_tokens", Linkage::Import, &sig)
+    //             .unwrap();
 
-        {
-            let mut fb = FunctionBackend {
-                backend: self,
-                builder,
-                current_block: ebb,
-                dynamic_fn_ptr_decl: dfp_decl,
-                data_map: BTreeMap::new(),
-            };
+    //         self.module.declare_func_in_func(func_id, &mut ctx.func)
+    //     };
 
-            for &param in params.iter() {
-                fb.compile_id(param)?;
-            }
+    //     let push_token_decl = {
+    //         let mut sig = self.module.make_signature();
 
-            // make the call
-            let magic_param = {
-                let current_fn_params = fb.builder.ebb_params(fb.current_block);
-                *current_fn_params.last().unwrap()
-            };
-            let normal_params = params
-                .iter()
-                .map(|param| fb.rvalue(*param))
-                .collect::<Vec<_>>();
-            let mut cranelift_params = normal_params;
-            cranelift_params.push(magic_param);
+    //         sig.params
+    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
+    //         sig.params.push(AbiParam::new(types::I64)); // unwrapped TokenVec
+    //         sig.params
+    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *BackendToken
 
-            let found_macro = fb.backend.funcs[&hoisting_name];
-            let found_macro = fb
-                .backend
-                .module
-                .declare_func_in_func(found_macro, &mut fb.builder.func);
+    //         let func_id = self
+    //             .module
+    //             .declare_function("__push_token", Linkage::Import, &sig)
+    //             .unwrap();
 
-            let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
-            let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
+    //         self.module.declare_func_in_func(func_id, &mut ctx.func)
+    //     };
 
-            fb.builder.ins().return_(&[return_value]);
+    //     let mut func_ctx = FunctionBuilderContext::new();
+    //     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
-            fb.builder.seal_all_blocks();
-            fb.builder.finalize();
-        }
+    //     declare_externs(self, &mut builder)?;
 
-        // Debug macro
-        // println!("{}", ctx.func.display(None));
+    //     let ebb = builder.create_ebb();
+    //     builder.switch_to_block(ebb);
+    //     builder.append_ebb_params_for_function_params(ebb);
 
-        self.module.define_function(func, &mut ctx).unwrap();
-        self.module.clear_context(&mut ctx);
+    //     {
+    //         let mut fb = FunctionBackend {
+    //             backend: self,
+    //             builder,
+    //             current_block: ebb,
+    //             dynamic_fn_ptr_decl: dfp_decl,
+    //             make_tokens_decl,
+    //             push_token_decl,
+    //             data_map: BTreeMap::new(),
+    //         };
 
-        self.module.finalize_definitions();
+    //         for &param in params.iter() {
+    //             fb.compile_id(param)?;
+    //         }
 
-        Ok(self.module.get_finalized_function(func))
-    }
+    //         // make the call
+    //         let magic_param = {
+    //             let current_fn_params = fb.builder.ebb_params(fb.current_block);
+    //             *current_fn_params.last().unwrap()
+    //         };
+    //         let normal_params = params
+    //             .iter()
+    //             .map(|param| fb.rvalue(*param))
+    //             .collect::<Vec<_>>();
+    //         let mut cranelift_params = normal_params;
+    //         cranelift_params.push(magic_param);
+
+    //         let found_macro = fb.backend.funcs[&hoisting_name];
+    //         let found_macro = fb
+    //             .backend
+    //             .module
+    //             .declare_func_in_func(found_macro, &mut fb.builder.func);
+
+    //         let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
+    //         let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
+
+    //         fb.builder.ins().return_(&[return_value]);
+
+    //         fb.builder.seal_all_blocks();
+    //         fb.builder.finalize();
+    //     }
+
+    //     // Debug macro
+    //     // println!("{}", ctx.func.display(None));
+
+    //     self.module.define_function(func, &mut ctx).unwrap();
+    //     self.module.clear_context(&mut ctx);
+
+    //     self.module.finalize_definitions();
+
+    //     Ok(self.module.get_finalized_function(func))
+    // }
 
     // Returns whether the value for a particular id is the value itself, or a pointer to the value
     // For instance, the constant integer 3 would likely be just the value, and not a pointer.
@@ -768,6 +835,8 @@ pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub builder: FunctionBuilder<'d>,
     pub current_block: Ebb,
     pub dynamic_fn_ptr_decl: FuncRef,
+    pub make_tokens_decl: FuncRef,
+    pub push_token_decl: FuncRef,
     pub data_map: BTreeMap<Id, CraneliftValue>,
 }
 
@@ -1502,29 +1571,29 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
-            Node::Tokens(token_vec_id) => {
-                let value = self.builder.ins().iconst(types::I64, token_vec_id.0 as i64);
+            // Node::Tokens(token_vec_id) => {
+            //     let value = self.builder.ins().iconst(types::I64, token_vec_id.0 as i64);
 
-                self.set_value(id, value);
+            //     self.set_value(id, value);
 
-                if self.backend.semantic.parser.node_is_addressable[id] {
-                    let slot = self.builder.create_stack_slot(StackSlotData {
-                        kind: StackSlotKind::ExplicitSlot,
-                        size: 8,
-                        offset: None,
-                    });
-                    let slot_addr = self.builder.ins().stack_addr(
-                        self.backend.module.isa().pointer_type(),
-                        slot,
-                        0,
-                    );
-                    let value = Value::Value(slot_addr);
-                    self.store_value(id, &value, None);
-                    self.backend.values[id] = value;
-                }
+            //     if self.backend.semantic.parser.node_is_addressable[id] {
+            //         let slot = self.builder.create_stack_slot(StackSlotData {
+            //             kind: StackSlotKind::ExplicitSlot,
+            //             size: 8,
+            //             offset: None,
+            //         });
+            //         let slot_addr = self.builder.ins().stack_addr(
+            //             self.backend.module.isa().pointer_type(),
+            //             slot,
+            //             0,
+            //         );
+            //         let value = Value::Value(slot_addr);
+            //         self.store_value(id, &value, None);
+            //         self.backend.values[id] = value;
+            //     }
 
-                Ok(())
-            }
+            //     Ok(())
+            // }
             Node::ArrayLiteral(elements) => {
                 let ty = match self.backend.semantic.types[id] {
                     Type::Array(ty) => ty,
@@ -1657,6 +1726,40 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             }
             Node::TypeLiteral(_) => {
                 self.backend.values[id] = Value::None;
+                Ok(())
+            }
+            Node::MakeTokens => {
+                // generate call for make_tokens extern function
+                let magic_param = {
+                    let current_fn_params = self.builder.ebb_params(self.current_block);
+                    *current_fn_params.last().unwrap()
+                };
+                let call_inst = self
+                    .builder
+                    .ins()
+                    .call(self.make_tokens_decl, &[magic_param]);
+
+                let value = self.builder.func.dfg.inst_results(call_inst)[0];
+                self.set_value(id, value);
+
+                Ok(())
+            }
+            Node::PushToken(tokens, token) => {
+                self.compile_id(tokens)?;
+                self.compile_id(token)?;
+
+                // generate call for make_tokens extern function
+                let magic_param = {
+                    let current_fn_params = self.builder.ebb_params(self.current_block);
+                    *current_fn_params.last().unwrap()
+                };
+                let tokens_param = self.rvalue(tokens);
+                let token_param = self.rvalue(token);
+                self.builder.ins().call(
+                    self.push_token_decl,
+                    &[magic_param, tokens_param, token_param],
+                );
+
                 Ok(())
             }
             _ => Err(CompileError::from_string(
@@ -2120,4 +2223,213 @@ fn print_string(len: i64, bytes: *mut u8) {
     let s = unsafe { String::from_raw_parts(bytes, len as usize, len as usize) };
     print!("{}", s);
     std::mem::forget(s);
+}
+
+fn make_tokens(semantic: *mut Semantic) -> i64 {
+    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
+    semantic.parser.push_token_vec(Vec::new()).0 as i64
+}
+
+#[repr(C)]
+struct BackendToken {
+    tag: i16,
+    data: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BackendString {
+    len: i64,
+    data: *const u8,
+}
+
+fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) {
+    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
+
+    let tag = unsafe { (*token).tag };
+
+    let tokens = semantic.parser.token_vecs.get_mut(tokens as usize).unwrap();
+
+    println!("pushing token with tag: {}", tag);
+
+    match tag {
+        0 => {
+            tokens.push(Lexeme::new(Token::LParen, Range::default()));
+        } // LParen,
+        1 => {
+            tokens.push(Lexeme::new(Token::RParen, Range::default()));
+        } // RParen,
+        2 => {
+            tokens.push(Lexeme::new(Token::LCurly, Range::default()));
+        } // LCurly,
+        3 => {
+            tokens.push(Lexeme::new(Token::RCurly, Range::default()));
+        } // RCurly,
+        4 => {
+            tokens.push(Lexeme::new(Token::LSquare, Range::default()));
+        } // LSquare,
+        5 => {
+            tokens.push(Lexeme::new(Token::RSquare, Range::default()));
+        } // RSquare,
+        6 => {
+            tokens.push(Lexeme::new(Token::DoubleLAngle, Range::default()));
+        } // DoubleLAngle,
+        7 => {
+            tokens.push(Lexeme::new(Token::DoubleRAngle, Range::default()));
+        } // DoubleRAngle,
+        8 => {
+            tokens.push(Lexeme::new(Token::LAngle, Range::default()));
+        } // LAngle,
+        9 => {
+            tokens.push(Lexeme::new(Token::RAngle, Range::default()));
+        } // RAngle,
+        10 => {
+            tokens.push(Lexeme::new(Token::Semicolon, Range::default()));
+        } // Semicolon,
+        11 => {
+            tokens.push(Lexeme::new(Token::Colon, Range::default()));
+        } // Colon,
+        12 => {
+            tokens.push(Lexeme::new(Token::Bang, Range::default()));
+        } // Bang,
+        13 => {
+            tokens.push(Lexeme::new(Token::Dot, Range::default()));
+        } // Dot,
+        14 => {
+            tokens.push(Lexeme::new(Token::Asterisk, Range::default()));
+        } // Asterisk,
+        15 => {
+            tokens.push(Lexeme::new(Token::EqEq, Range::default()));
+        } // EqEq,
+        16 => {
+            tokens.push(Lexeme::new(Token::Neq, Range::default()));
+        } // Neq,
+        17 => {
+            tokens.push(Lexeme::new(Token::Add, Range::default()));
+        } // Add,
+        18 => {
+            tokens.push(Lexeme::new(Token::Sub, Range::default()));
+        } // Sub,
+        19 => {
+            tokens.push(Lexeme::new(Token::Mul, Range::default()));
+        } // Mul,
+        20 => {
+            tokens.push(Lexeme::new(Token::Div, Range::default()));
+        } // Div,
+        21 => {
+            tokens.push(Lexeme::new(Token::Eq, Range::default()));
+        } // Eq,
+        22 => {
+            tokens.push(Lexeme::new(Token::Comma, Range::default()));
+        } // Comma,
+        23 => {
+            tokens.push(Lexeme::new(Token::Struct, Range::default()));
+        } // Struct,
+        24 => {
+            tokens.push(Lexeme::new(Token::Enum, Range::default()));
+        } // Enum,
+        25 => {
+            tokens.push(Lexeme::new(Token::Fn, Range::default()));
+        } // Fn,
+        26 => {
+            tokens.push(Lexeme::new(Token::Macro, Range::default()));
+        } // Macro,
+        27 => {
+            tokens.push(Lexeme::new(Token::Extern, Range::default()));
+        } // Extern,
+        28 => {
+            tokens.push(Lexeme::new(Token::Tokens, Range::default()));
+        } // Tokens_,
+        29 => {
+            tokens.push(Lexeme::new(Token::TypeOf, Range::default()));
+        } // TypeOf,
+        30 => {
+            tokens.push(Lexeme::new(Token::Cast, Range::default()));
+        } // Cast,
+        31 => {
+            tokens.push(Lexeme::new(Token::If, Range::default()));
+        } // If,
+        32 => {
+            tokens.push(Lexeme::new(Token::While, Range::default()));
+        } // While,
+        33 => {
+            tokens.push(Lexeme::new(Token::Else, Range::default()));
+        } // Else,
+        34 => {
+            tokens.push(Lexeme::new(Token::True, Range::default()));
+        } // True,
+        35 => {
+            tokens.push(Lexeme::new(Token::False, Range::default()));
+        } // False,
+        36 => {
+            tokens.push(Lexeme::new(Token::I8, Range::default()));
+        } // I8,
+        37 => {
+            tokens.push(Lexeme::new(Token::I16, Range::default()));
+        } // I16,
+        38 => {
+            tokens.push(Lexeme::new(Token::I32, Range::default()));
+        } // I32,
+        39 => {
+            tokens.push(Lexeme::new(Token::I64, Range::default()));
+        } // I64,
+        40 => {
+            tokens.push(Lexeme::new(Token::Ampersand, Range::default()));
+        } // Ampersand,
+        41 => {
+            tokens.push(Lexeme::new(Token::Type, Range::default()));
+        } // Type_,
+        42 => {
+            tokens.push(Lexeme::new(Token::Caret, Range::default()));
+        } // Caret,
+        43 => {
+            tokens.push(Lexeme::new(Token::Uninit, Range::default()));
+        } // Uninit,
+        44 => {
+            let sym = unsafe {
+                let bs = *std::mem::transmute::<&[u8; 16], *const BackendString>(&((*token).data));
+                let s =
+                    String::from_raw_parts(bs.data as *mut u8, bs.len as usize, bs.len as usize);
+
+                let sym = semantic
+                    .parser
+                    .lexer
+                    .string_interner
+                    .get_or_intern(s.clone());
+                std::mem::forget(s);
+                sym
+            };
+
+            tokens.push(Lexeme::new(Token::Symbol(sym), Range::default()));
+        } // Symbol: string,
+        45 => {
+            let n = unsafe { *std::mem::transmute::<&[u8; 16], *const i64>(&((*token).data)) };
+            tokens.push(Lexeme::new(
+                Token::IntegerLiteral(n, NumericSpecification::I64),
+                Range::default(),
+            ));
+        } // IntegerLiteral: i64, // todo(chad): specification
+        46 => {
+            let n = unsafe { *std::mem::transmute::<&[u8; 16], *const f64>(&((*token).data)) };
+            tokens.push(Lexeme::new(Token::FloatLiteral(n), Range::default()));
+        } // FloatLiteral: f64, // todo(chad): specification
+        47 => {
+            let sym = unsafe {
+                let bs = *std::mem::transmute::<&[u8; 16], *const BackendString>(&((*token).data));
+                let s =
+                    String::from_raw_parts(bs.data as *mut u8, bs.len as usize, bs.len as usize);
+
+                let sym = semantic
+                    .parser
+                    .lexer
+                    .string_interner
+                    .get_or_intern(s.clone());
+                std::mem::forget(s);
+                sym
+            };
+
+            tokens.push(Lexeme::new(Token::StringLiteral(sym), Range::default()));
+        } // StringLiteral: string,
+        _ => unreachable!(),
+    }
 }
