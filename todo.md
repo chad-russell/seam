@@ -2,7 +2,8 @@
 
 ## Definitely Implement
 
-- [ ] routine to push token from a macro
+- [ ] get rid of 'Tokens' concept. Just take a []Token and return a []Token instead
+    - [ ] until we have struct parameters / returns, take a *[]Token and return a *[]Token
 - [ ] handle empty / no return type
 - [ ] malloc
 - [ ] integer promotions
