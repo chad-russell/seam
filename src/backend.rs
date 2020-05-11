@@ -410,10 +410,6 @@ impl<'a, 'b> Backend<'a, 'b> {
                     sig.params
                         .push(AbiParam::new(into_cranelift_type(&self, *param)?));
                 }
-                // if is_macro {
-                //     // macros always take a pointer to a `Semantic` as their last parameter
-                //     sig.params.push(AbiParam::new(types::I64));
-                // }
 
                 let return_size = type_size(&self.semantic, &self.module, return_ty);
                 if return_size > 0 {
@@ -455,21 +451,6 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                     self.module.declare_func_in_func(func_id, &mut builder.func)
                 };
-
-                // let make_tokens_decl = {
-                //     let mut sig = self.module.make_signature();
-
-                //     sig.params
-                //         .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
-                //     sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
-
-                //     let func_id = self
-                //         .module
-                //         .declare_function("__make_tokens", Linkage::Import, &sig)
-                //         .unwrap();
-
-                //     self.module.declare_func_in_func(func_id, &mut builder.func)
-                // };
 
                 let push_token_decl = {
                     let mut sig = self.module.make_signature();
@@ -708,162 +689,6 @@ impl<'a, 'b> Backend<'a, 'b> {
             self.values.push(Value::Unassigned);
         }
     }
-
-    // pub fn build_hoisted_function(
-    //     &mut self,
-    //     call_id: Id,
-    //     params: Vec<Id>,
-    //     hoisting_name: Sym,
-    // ) -> Result<*const u8, CompileError> {
-    //     // println!(
-    //     //     "compiling hoisting function for {}",
-    //     //     self.resolve_symbol(hoisting_name)
-    //     // );
-
-    //     self.funcs.clear();
-    //     for (name, sig) in self.func_sigs.iter() {
-    //         self.funcs.insert(
-    //             name.clone(),
-    //             self.module
-    //                 .declare_function(&self.resolve_symbol(*name), Linkage::Import, &sig)
-    //                 .unwrap(),
-    //         );
-    //     }
-
-    //     let mut ctx = self.module.make_context();
-    //     let mut sig = self.module.make_signature();
-
-    //     // param 0 = ptr to semantic
-    //     // todo(chad): eventually param 1 = ptr to return value
-    //     sig.params
-    //         .push(AbiParam::new(self.module.isa().pointer_type()));
-    //     sig.returns.push(AbiParam::new(types::I64));
-
-    //     ctx.func.signature = sig;
-
-    //     // self
-    //     //     .func_sigs
-    //     //     .insert(func_sym, ctx.func.signature.clone());
-
-    //     let func = self
-    //         .module
-    //         .declare_function(
-    //             &format!("hoist_{}", call_id),
-    //             Linkage::Local,
-    //             &ctx.func.signature,
-    //         )
-    //         .unwrap();
-    //     ctx.func.name = ExternalName::user(0, func.as_u32());
-
-    //     let dfp_decl = {
-    //         let mut dfp_sig = self.module.make_signature();
-
-    //         dfp_sig.params.push(AbiParam::new(types::I64));
-    //         dfp_sig
-    //             .returns
-    //             .push(AbiParam::new(self.module.isa().pointer_type()));
-
-    //         let dfp_func_id = self
-    //             .module
-    //             .declare_function("__dynamic_fn_ptr", Linkage::Import, &dfp_sig)
-    //             .unwrap();
-
-    //         self.module.declare_func_in_func(dfp_func_id, &mut ctx.func)
-    //     };
-
-    //     let make_tokens_decl = {
-    //         let mut sig = self.module.make_signature();
-
-    //         sig.params
-    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
-    //         sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
-
-    //         let func_id = self
-    //             .module
-    //             .declare_function("__make_tokens", Linkage::Import, &sig)
-    //             .unwrap();
-
-    //         self.module.declare_func_in_func(func_id, &mut ctx.func)
-    //     };
-
-    //     let push_token_decl = {
-    //         let mut sig = self.module.make_signature();
-
-    //         sig.params
-    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
-    //         sig.params.push(AbiParam::new(types::I64)); // unwrapped TokenVec
-    //         sig.params
-    //             .push(AbiParam::new(self.module.isa().pointer_type())); // *BackendToken
-
-    //         let func_id = self
-    //             .module
-    //             .declare_function("__push_token", Linkage::Import, &sig)
-    //             .unwrap();
-
-    //         self.module.declare_func_in_func(func_id, &mut ctx.func)
-    //     };
-
-    //     let mut func_ctx = FunctionBuilderContext::new();
-    //     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-
-    //     declare_externs(self, &mut builder)?;
-
-    //     let ebb = builder.create_ebb();
-    //     builder.switch_to_block(ebb);
-    //     builder.append_ebb_params_for_function_params(ebb);
-
-    //     {
-    //         let mut fb = FunctionBackend {
-    //             backend: self,
-    //             builder,
-    //             current_block: ebb,
-    //             dynamic_fn_ptr_decl: dfp_decl,
-    //             make_tokens_decl,
-    //             push_token_decl,
-    //             data_map: BTreeMap::new(),
-    //         };
-
-    //         for &param in params.iter() {
-    //             fb.compile_id(param)?;
-    //         }
-
-    //         // make the call
-    //         let magic_param = {
-    //             let current_fn_params = fb.builder.ebb_params(fb.current_block);
-    //             *current_fn_params.last().unwrap()
-    //         };
-    //         let normal_params = params
-    //             .iter()
-    //             .map(|param| fb.rvalue(*param))
-    //             .collect::<Vec<_>>();
-    //         let mut cranelift_params = normal_params;
-    //         cranelift_params.push(magic_param);
-
-    //         let found_macro = fb.backend.funcs[&hoisting_name];
-    //         let found_macro = fb
-    //             .backend
-    //             .module
-    //             .declare_func_in_func(found_macro, &mut fb.builder.func);
-
-    //         let call_inst = fb.builder.ins().call(found_macro, &cranelift_params);
-    //         let return_value = fb.builder.func.dfg.inst_results(call_inst)[0];
-
-    //         fb.builder.ins().return_(&[return_value]);
-
-    //         fb.builder.seal_all_blocks();
-    //         fb.builder.finalize();
-    //     }
-
-    //     // Debug macro
-    //     // println!("{}", ctx.func.display(None));
-
-    //     self.module.define_function(func, &mut ctx).unwrap();
-    //     self.module.clear_context(&mut ctx);
-
-    //     self.module.finalize_definitions();
-
-    //     Ok(self.module.get_finalized_function(func))
-    // }
 
     // Returns whether the value for a particular id is the value itself, or a pointer to the value
     // For instance, the constant integer 3 would likely be just the value, and not a pointer.
@@ -1684,29 +1509,6 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
 
                 Ok(())
             }
-            // Node::Tokens(token_vec_id) => {
-            //     let value = self.builder.ins().iconst(types::I64, token_vec_id.0 as i64);
-
-            //     self.set_value(id, value);
-
-            //     if self.backend.semantic.parser.node_is_addressable[id] {
-            //         let slot = self.builder.create_stack_slot(StackSlotData {
-            //             kind: StackSlotKind::ExplicitSlot,
-            //             size: 8,
-            //             offset: None,
-            //         });
-            //         let slot_addr = self.builder.ins().stack_addr(
-            //             self.backend.module.isa().pointer_type(),
-            //             slot,
-            //             0,
-            //         );
-            //         let value = Value::Value(slot_addr);
-            //         self.store_value(id, &value, None);
-            //         self.backend.values[id] = value;
-            //     }
-
-            //     Ok(())
-            // }
             Node::ArrayLiteral(elements) => {
                 let ty = match self.backend.semantic.types[id] {
                     Type::Array(ty) => ty,
@@ -1841,22 +1643,6 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.backend.values[id] = Value::None;
                 Ok(())
             }
-            // Node::MakeTokens => {
-            //     // generate call for make_tokens extern function
-            //     let magic_param = {
-            //         let current_fn_params = self.builder.ebb_params(self.current_block);
-            //         *current_fn_params.last().unwrap()
-            //     };
-            //     let call_inst = self
-            //         .builder
-            //         .ins()
-            //         .call(self.make_tokens_decl, &[magic_param]);
-
-            //     let value = self.builder.func.dfg.inst_results(call_inst)[0];
-            //     self.set_value(id, value);
-
-            //     Ok(())
-            // }
             _ => Err(CompileError::from_string(
                 format!(
                     "Unhandled node: {:?} ({})",
