@@ -204,7 +204,6 @@ pub enum Token {
     Caret,
     Uninit,
     MakeTokens,
-    PushToken,
     Symbol(Sym),
     IntegerLiteral(i64, NumericSpecification), // TODO: handle negative literals
     FloatLiteral(f64),                         // TODO: handle negative literals
@@ -461,9 +460,6 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("#make_tokens", Token::MakeTokens) {
             return;
         }
-        if self.prefix_keyword("#push_token", Token::PushToken) {
-            return;
-        }
         if self.prefix_keyword("Tokens", Token::Tokens) {
             return;
         }
@@ -577,9 +573,6 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix("-", Token::Sub) {
-            return;
-        }
-        if self.prefix("*", Token::Mul) {
             return;
         }
         if self.prefix("/", Token::Div) {
@@ -1200,7 +1193,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_if(&mut self, start: Location) -> Result<Id, CompileError> {
+    fn parse_if(&mut self) -> Result<Id, CompileError> {
+        let start = self.lexer.top.range.start;
+
         self.expect(&Token::If)?;
 
         let cond_expr = match (&self.lexer.top.tok, &self.lexer.second.tok) {
@@ -1223,14 +1218,19 @@ impl<'a> Parser<'a> {
         let mut false_stmts = Vec::new();
         if self.lexer.top.tok == Token::Else {
             self.lexer.pop(); // `else`
-            self.expect(&Token::LCurly)?;
 
-            while self.lexer.top.tok != Token::RCurly {
-                false_stmts.push(self.parse_fn_stmt()?);
+            if self.lexer.top.tok == Token::If {
+                false_stmts.push(self.parse_if()?);
+            } else {
+                self.expect(&Token::LCurly)?;
+
+                while self.lexer.top.tok != Token::RCurly {
+                    false_stmts.push(self.parse_fn_stmt()?);
+                }
+
+                end = self.lexer.top.range.end;
+                self.expect(&Token::RCurly)?;
             }
-
-            end = self.lexer.top.range.end;
-            self.expect(&Token::RCurly)?;
         }
         let false_stmts = self.push_id_vec(false_stmts);
         self.pop_scope(false_scope);
@@ -1292,7 +1292,7 @@ impl<'a> Parser<'a> {
                 | Token::Neq
                 | Token::Add
                 | Token::Sub
-                | Token::Mul
+                | Token::Asterisk
                 | Token::Div
                 | Token::LAngle
                 | Token::RAngle => {
@@ -1317,7 +1317,6 @@ impl<'a> Parser<'a> {
                 | Token::LParen
                 | Token::Cast
                 | Token::MakeTokens
-                | Token::PushToken
                 | Token::Symbol(_)
                 | Token::I8
                 | Token::I16
@@ -1394,7 +1393,7 @@ impl<'a> Parser<'a> {
 
                 Ok(self.push_node(range, Node::Sub(lhs, rhs)))
             }
-            Shunting::Operator(Token::Mul) => {
+            Shunting::Operator(Token::Asterisk) => {
                 output.pop();
                 let rhs = output.pop().unwrap().as_id();
                 let lhs = output.pop().unwrap().as_id();
@@ -1528,20 +1527,6 @@ impl<'a> Parser<'a> {
                 let range = self.expect_range(start, Token::RParen)?;
 
                 let id = self.push_node(range, Node::MakeTokens);
-
-                Ok(id)
-            }
-            Token::PushToken => {
-                let start = self.lexer.top.range.start;
-                self.lexer.pop(); // `#push_token`
-                self.expect(&Token::LParen)?;
-                let tokens = self.parse_expression()?;
-                self.expect(&Token::Comma)?;
-                let token = self.parse_expression()?;
-
-                let range = self.expect_range(start, Token::RParen)?;
-
-                let id = self.push_node(range, Node::PushToken(tokens, token));
 
                 Ok(id)
             }
@@ -1725,7 +1710,7 @@ impl<'a> Parser<'a> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
-            Token::If => self.parse_if(start),
+            Token::If => self.parse_if(),
             Token::While => self.parse_while(start),
             Token::Return => {
                 self.lexer.pop(); // `return`

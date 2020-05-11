@@ -2,12 +2,7 @@
 
 ## Definitely Implement
 
-- [ ] get rid of 'Tokens' concept. Just take a []Token and return a []Token instead
-    - [ ] until we have struct parameters / returns, take a *[]Token and return a *[]Token
-- [ ] handle empty / no return type
-- [ ] malloc
 - [ ] integer promotions
-- [ ] `else if`
 - [ ] import other files / modules
 - [ ] switch on enums
     - [ ] check cases are exhaustive
@@ -23,6 +18,9 @@
 - [ ] structs as function parameters / return values
 - [ ] annotation for functions to follow C ABI
 - [ ] unsigned integers
+- [ ] handle empty / no return type
+- [ ] get rid of 'Tokens' concept. Just take a []Token and return a []Token instead
+    - [x] until we have struct parameters / returns, take a *[]Token and return a *[]Token
 
 ## Optimization
 

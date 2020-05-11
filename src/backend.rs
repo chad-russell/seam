@@ -101,13 +101,13 @@ impl<'a, 'b> Backend<'a, 'b> {
         let mut module: Module<SimpleJITBackend> = {
             let mut jit_builder = SimpleJITBuilder::new(default_libcall_names());
             jit_builder.symbol("__dynamic_fn_ptr", dynamic_fn_ptr as *const u8);
-            jit_builder.symbol("__make_tokens", make_tokens as *const u8);
             jit_builder.symbol("__push_token", push_token as *const u8);
             jit_builder.symbol("print_i8", print_i8 as *const u8);
             jit_builder.symbol("print_i16", print_i16 as *const u8);
             jit_builder.symbol("print_i32", print_i32 as *const u8);
             jit_builder.symbol("print_i64", print_i64 as *const u8);
             jit_builder.symbol("print_string", print_string as *const u8);
+            jit_builder.symbol("alloc", alloc_helper as *const u8);
 
             Module::new(jit_builder)
         };
@@ -215,6 +215,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             }
             self.semantic.unify_types()?;
             self.allocate_for_new_nodes();
+
             for t in self.semantic.topo.clone() {
                 self.compile_id(t)?;
             }
@@ -224,14 +225,18 @@ impl<'a, 'b> Backend<'a, 'b> {
 
         // ugh clone...
         for tl in self.semantic.parser.top_level.clone() {
-            let is_poly = match &self.semantic.parser.nodes[tl] {
-                Node::Func { ct_params, .. } => ct_params.is_some(),
+            let is_poly_or_macro = match &self.semantic.parser.nodes[tl] {
+                Node::Func {
+                    ct_params,
+                    is_macro,
+                    ..
+                } => ct_params.is_some() || *is_macro,
                 Node::Struct { ct_params, .. } => ct_params.is_some(),
                 Node::Enum { ct_params, .. } => ct_params.is_some(),
                 _ => false,
             };
 
-            if !is_poly {
+            if !is_poly_or_macro {
                 self.semantic.assign_type(tl)?
             }
         }
@@ -381,11 +386,11 @@ impl<'a, 'b> Backend<'a, 'b> {
                 params,    // IdVec,
                 return_ty, // Id,
                 stmts,     // IdVec,
-                is_macro,
+                is_macro: _,
                 copied_from: _,
                 ..
             } => {
-                let now = std::time::Instant::now();
+                let _now = std::time::Instant::now();
 
                 let mut ctx = self.module.make_context();
 
@@ -405,10 +410,10 @@ impl<'a, 'b> Backend<'a, 'b> {
                     sig.params
                         .push(AbiParam::new(into_cranelift_type(&self, *param)?));
                 }
-                if is_macro {
-                    // macros always take a pointer to a `Semantic` as their last parameter
-                    sig.params.push(AbiParam::new(types::I64));
-                }
+                // if is_macro {
+                //     // macros always take a pointer to a `Semantic` as their last parameter
+                //     sig.params.push(AbiParam::new(types::I64));
+                // }
 
                 let return_size = type_size(&self.semantic, &self.module, return_ty);
                 if return_size > 0 {
@@ -451,20 +456,20 @@ impl<'a, 'b> Backend<'a, 'b> {
                     self.module.declare_func_in_func(func_id, &mut builder.func)
                 };
 
-                let make_tokens_decl = {
-                    let mut sig = self.module.make_signature();
+                // let make_tokens_decl = {
+                //     let mut sig = self.module.make_signature();
 
-                    sig.params
-                        .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
-                    sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
+                //     sig.params
+                //         .push(AbiParam::new(self.module.isa().pointer_type())); // *Backend
+                //     sig.returns.push(AbiParam::new(types::I64)); // unwrapped TokenVec
 
-                    let func_id = self
-                        .module
-                        .declare_function("__make_tokens", Linkage::Import, &sig)
-                        .unwrap();
+                //     let func_id = self
+                //         .module
+                //         .declare_function("__make_tokens", Linkage::Import, &sig)
+                //         .unwrap();
 
-                    self.module.declare_func_in_func(func_id, &mut builder.func)
-                };
+                //     self.module.declare_func_in_func(func_id, &mut builder.func)
+                // };
 
                 let push_token_decl = {
                     let mut sig = self.module.make_signature();
@@ -490,7 +495,6 @@ impl<'a, 'b> Backend<'a, 'b> {
                     builder,
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
-                    make_tokens_decl,
                     push_token_decl,
                     data_map: BTreeMap::new(),
                 };
@@ -545,12 +549,31 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 // let compiled_macro = self.build_hoisted_function(id, params, name)?;
                 // let compiled_macro: fn(semantic: *mut Semantic) -> i64 = unsafe { std::mem::transmute(compiled_macro) };
-                let compiled_macro: fn(i64, *const Semantic) -> i64 =
+                let compiled_macro: fn(*const BackendTokenArray) -> *mut BackendTokenArray =
                     unsafe { std::mem::transmute((FUNC_PTRS.lock().unwrap())[&name]) };
 
-                let tokens_id = compiled_macro(input.0 as _, self.semantic as *const _);
-                let tokens = self.semantic.parser.token_vecs[tokens_id as usize].clone();
+                let mut backend_tokens = self.to_backend_token_array(input);
+                let mut backend_token_array = BackendTokenArray {
+                    length: backend_tokens.len() as _,
+                    data: backend_tokens.as_mut_ptr(),
+                };
 
+                let result_tokens = compiled_macro(&mut backend_token_array as *mut _);
+                let result_tokens: Vec<BackendToken> = unsafe {
+                    Vec::from_raw_parts(
+                        (*result_tokens).data,
+                        (*result_tokens).length as _,
+                        (*result_tokens).length as _,
+                    )
+                };
+
+                let tokens_id = self.semantic.parser.push_token_vec(Vec::new());
+                for rt in result_tokens.iter() {
+                    push_token(self.semantic as *mut _, tokens_id.0 as _, rt as *const _)
+                }
+                std::mem::forget(result_tokens);
+
+                let tokens = self.semantic.parser.token_vecs[tokens_id.0 as usize].clone();
                 self.semantic.parser.lexer.macro_tokens = Some(tokens);
                 self.semantic.parser.top_scope = self.semantic.parser.node_scopes[id];
                 self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Range::default());
@@ -587,6 +610,96 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.semantic.parser.ranges[id],
             )),
         }
+    }
+
+    fn to_backend_token_array(&self, tv: TokenVec) -> Vec<BackendToken> {
+        let mut tokens = Vec::new();
+        let mut strings = Vec::new();
+        for t in self.semantic.parser.token_vecs.get(tv.0).unwrap() {
+            tokens.push(self.to_backend_token(t, &mut strings));
+        }
+        std::mem::forget(strings);
+
+        return tokens;
+    }
+
+    fn to_backend_token(&self, lex: &Lexeme, strings: &mut Vec<String>) -> BackendToken {
+        let tag = match lex.tok {
+            Token::LParen => 0,
+            Token::RParen => 1,
+            Token::LCurly => 2,
+            Token::RCurly => 3,
+            Token::LSquare => 4,
+            Token::RSquare => 5,
+            Token::DoubleLAngle => 6,
+            Token::DoubleRAngle => 7,
+            Token::LAngle => 8,
+            Token::RAngle => 9,
+            Token::Semicolon => 10,
+            Token::Colon => 11,
+            Token::Bang => 12,
+            Token::Dot => 13,
+            Token::Asterisk => 14,
+            Token::EqEq => 15,
+            Token::Neq => 16,
+            Token::Add => 17,
+            Token::Sub => 18,
+            Token::Mul => 19,
+            Token::Div => 20,
+            Token::Eq => 21,
+            Token::Comma => 22,
+            Token::Struct => 23,
+            Token::Enum => 24,
+            Token::Fn => 25,
+            Token::Macro => 26,
+            Token::Extern => 27,
+            Token::Tokens => 28,
+            Token::TypeOf => 29,
+            Token::Cast => 30,
+            Token::If => 31,
+            Token::While => 32,
+            Token::Else => 33,
+            Token::True => 34,
+            Token::False => 35,
+            Token::I8 => 36,
+            Token::I16 => 37,
+            Token::I32 => 38,
+            Token::I64 => 39,
+            Token::Ampersand => 40,
+            Token::Type => 41,
+            Token::Caret => 42,
+            Token::Uninit => 43,
+            Token::Symbol(_) => 44,
+            Token::IntegerLiteral(_, _) => 45,
+            Token::FloatLiteral(_) => 46,
+            Token::StringLiteral(_) => 47,
+            _ => unreachable!(),
+        };
+
+        let data = match lex.tok {
+            Token::Symbol(sym) | Token::StringLiteral(sym) => {
+                let sym_str: String = self.resolve_symbol(sym);
+                let len = unsafe { std::mem::transmute::<usize, [u8; 8]>(sym_str.len()) };
+
+                let data = sym_str.as_ptr();
+                let data = unsafe { std::mem::transmute::<_, [u8; 8]>(data) };
+
+                strings.push(sym_str);
+
+                unsafe { std::mem::transmute::<_, [u8; 16]>([len, data]) }
+            }
+            Token::FloatLiteral(f) => unsafe {
+                let f = std::mem::transmute::<f64, [u8; 8]>(f);
+                std::mem::transmute::<_, [u8; 16]>([f, [0u8; 8]])
+            },
+            Token::IntegerLiteral(n, _) => unsafe {
+                let n = std::mem::transmute::<i64, [u8; 8]>(n);
+                std::mem::transmute::<_, [u8; 16]>([n, [0u8; 8]])
+            },
+            _ => [0u8; 16],
+        };
+
+        BackendToken { tag, data }
     }
 
     pub fn allocate_for_new_nodes(&mut self) {
@@ -835,7 +948,6 @@ pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub builder: FunctionBuilder<'d>,
     pub current_block: Ebb,
     pub dynamic_fn_ptr_decl: FuncRef,
-    pub make_tokens_decl: FuncRef,
     pub push_token_decl: FuncRef,
     pub data_map: BTreeMap<Id, CraneliftValue>,
 }
@@ -1404,6 +1516,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 let ty = match ty {
                     Type::Struct { .. } => self.backend.module.isa().pointer_type(),
                     Type::Enum { .. } => self.backend.module.isa().pointer_type(),
+                    Type::Array(_) => self.backend.module.isa().pointer_type(),
                     _ => into_cranelift_type(&self.backend, id)?,
                 };
 
@@ -1728,40 +1841,22 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.backend.values[id] = Value::None;
                 Ok(())
             }
-            Node::MakeTokens => {
-                // generate call for make_tokens extern function
-                let magic_param = {
-                    let current_fn_params = self.builder.ebb_params(self.current_block);
-                    *current_fn_params.last().unwrap()
-                };
-                let call_inst = self
-                    .builder
-                    .ins()
-                    .call(self.make_tokens_decl, &[magic_param]);
+            // Node::MakeTokens => {
+            //     // generate call for make_tokens extern function
+            //     let magic_param = {
+            //         let current_fn_params = self.builder.ebb_params(self.current_block);
+            //         *current_fn_params.last().unwrap()
+            //     };
+            //     let call_inst = self
+            //         .builder
+            //         .ins()
+            //         .call(self.make_tokens_decl, &[magic_param]);
 
-                let value = self.builder.func.dfg.inst_results(call_inst)[0];
-                self.set_value(id, value);
+            //     let value = self.builder.func.dfg.inst_results(call_inst)[0];
+            //     self.set_value(id, value);
 
-                Ok(())
-            }
-            Node::PushToken(tokens, token) => {
-                self.compile_id(tokens)?;
-                self.compile_id(token)?;
-
-                // generate call for make_tokens extern function
-                let magic_param = {
-                    let current_fn_params = self.builder.ebb_params(self.current_block);
-                    *current_fn_params.last().unwrap()
-                };
-                let tokens_param = self.rvalue(tokens);
-                let token_param = self.rvalue(token);
-                self.builder.ins().call(
-                    self.push_token_decl,
-                    &[magic_param, tokens_param, token_param],
-                );
-
-                Ok(())
-            }
+            //     Ok(())
+            // }
             _ => Err(CompileError::from_string(
                 format!(
                     "Unhandled node: {:?} ({})",
@@ -2225,9 +2320,8 @@ fn print_string(len: i64, bytes: *mut u8) {
     std::mem::forget(s);
 }
 
-fn make_tokens(semantic: *mut Semantic) -> i64 {
-    let semantic: &mut Semantic = unsafe { std::mem::transmute(semantic) };
-    semantic.parser.push_token_vec(Vec::new()).0 as i64
+fn alloc_helper(bytes: i64) -> *mut u8 {
+    unsafe { std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(bytes as _, 1).unwrap()) }
 }
 
 #[repr(C)]
@@ -2237,10 +2331,16 @@ struct BackendToken {
 }
 
 #[repr(C)]
+struct BackendTokenArray {
+    length: i64,
+    data: *mut BackendToken,
+}
+
+#[repr(C)]
 #[derive(Copy, Clone)]
 struct BackendString {
     len: i64,
-    data: *const u8,
+    data: *mut u8,
 }
 
 fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) {
@@ -2249,8 +2349,6 @@ fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) 
     let tag = unsafe { (*token).tag };
 
     let tokens = semantic.parser.token_vecs.get_mut(tokens as usize).unwrap();
-
-    println!("pushing token with tag: {}", tag);
 
     match tag {
         0 => {

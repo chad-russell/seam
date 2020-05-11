@@ -202,7 +202,9 @@ impl<'a> Semantic<'a> {
                 };
 
                 if is_load {
-                    if let Node::Set { is_store, .. } = &mut self.parser.nodes[id] { *is_store = true; }
+                    if let Node::Set { is_store, .. } = &mut self.parser.nodes[id] {
+                        *is_store = true;
+                    }
                 }
 
                 Ok(())
@@ -222,10 +224,7 @@ impl<'a> Semantic<'a> {
                 }
                 Ok(())
             }
-            Node::While {
-                cond,
-                stmts,
-            } => {
+            Node::While { cond, stmts } => {
                 self.assign_type(cond)?;
 
                 for stmt in self.parser.id_vec(stmts).clone() {
@@ -287,7 +286,7 @@ impl<'a> Semantic<'a> {
                             self.types[id] = Type::Basic(BasicType::I64);
                         }
                         "ptr" => {
-                            // todo(chad): maybe make StringPointer its own type or something?
+                            // todo(chad): maybe make ArrayPointer its own type or something?
                             // or have Ids that will always reference basic types
                             self.types[id] = Type::Type;
                         }
@@ -302,17 +301,19 @@ impl<'a> Semantic<'a> {
                     return Ok(());
                 }
 
-                let params = self.types[unpointered_ty].as_struct_params().ok_or_else(||
-                    CompileError::from_string(
-                        format!(
-                            "Expected struct or enum, got {:?} for node {}",
-                            // self.parser.debug(unpointered_ty),
-                            self.types[unpointered_ty],
-                            unpointered_ty,
-                        ),
-                        self.parser.ranges[base],
-                    ),
-                )?;
+                let params = self.types[unpointered_ty]
+                    .as_struct_params()
+                    .ok_or_else(|| {
+                        CompileError::from_string(
+                            format!(
+                                "Expected struct or enum, got {:?} for node {}",
+                                // self.parser.debug(unpointered_ty),
+                                self.types[unpointered_ty],
+                                unpointered_ty,
+                            ),
+                            self.parser.ranges[base],
+                        )
+                    })?;
                 let params = self.get_struct_params(params);
 
                 match params.get(&field_name) {
@@ -418,7 +419,12 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
-            Node::Add(lhs, rhs) | Node::Sub(lhs, rhs) | Node::Mul(lhs, rhs) | Node::Div(lhs, rhs) | Node::LessThan(lhs, rhs) | Node::GreaterThan(lhs, rhs) => {
+            Node::Add(lhs, rhs)
+            | Node::Sub(lhs, rhs)
+            | Node::Mul(lhs, rhs)
+            | Node::Div(lhs, rhs)
+            | Node::LessThan(lhs, rhs)
+            | Node::GreaterThan(lhs, rhs) => {
                 self.assign_type(lhs)?;
                 self.assign_type(rhs)?;
                 self.match_types(lhs, rhs)?;
@@ -541,7 +547,7 @@ impl<'a> Semantic<'a> {
                 }
             }
             Node::TypeLiteral(ty) => {
-                self.types[id] = Type::Type;
+                self.types[id] = ty;
 
                 match ty {
                     Type::Basic(_) => {
@@ -762,6 +768,10 @@ impl<'a> Semantic<'a> {
             Node::Enum {
                 ct_params, params, ..
             } => {
+                if id == 294 {
+                    let _stopme = 3;
+                }
+
                 // for recursion purposes, give the struct a placeholder type before anything else
                 self.types[id] = Type::Type;
 
@@ -809,6 +819,8 @@ impl<'a> Semantic<'a> {
                 self.types[id] = Type::Type;
 
                 self.assign_type(expr)?;
+                self.assign_type(self.parser.ty_decl.unwrap())?;
+
                 self.match_types(id, self.parser.ty_decl.unwrap())?;
 
                 Ok(())
@@ -823,21 +835,13 @@ impl<'a> Semantic<'a> {
                 self.types[id] = Type::Tokens;
                 Ok(())
             }
-            Node::PushToken(tokens, token) => {
-                self.assign_type(tokens)?;
-                self.assign_type(token)?;
-
-                // todo(chad): type checking on arguments
-                self.types[id] = Type::Type;
-                Ok(())
-            }
-            // _ => Err(CompileError::from_string(
-            //     format!(
-            //         "Cannot coerce type for AST node {:?}",
-            //         &self.parser.nodes[id]
-            //     ),
-            //     self.parser.ranges[id],
-            // )),
+            _ => Err(CompileError::from_string(
+                format!(
+                    "Cannot coerce type for AST node {:?}",
+                    &self.parser.nodes[id]
+                ),
+                self.parser.ranges[id],
+            )),
         }
     }
 
