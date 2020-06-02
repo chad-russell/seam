@@ -43,16 +43,27 @@ macro mac_test(t: *[]Token) *[]Token {
 mac_test!{ 3 }
 
 macro mac_test_2(t: *[]Token) *[]Token {
-    let arr_ptr = alloc_array(9);
+    let arr_ptr = alloc_array<<Token>>(9);
 
-    print(&"woot\n");
+    // extern print_i32(i: i64);
+    let arr = ^arr_ptr;
+    arr[0] = { Extern: {} };
+    arr[1] = { Symbol: "print_i32" };
+    arr[2] = { LParen: {} };
+    arr[3] = { Symbol: "i" };
+    arr[4] = { Colon: {} };
+    arr[5] = { I64: {} };
+    arr[6] = { RParen: {} };
+    arr[7] = { I64: {} };
+    arr[8] = { Semicolon: {} };
+
     return t;
 }
 mac_test_2!{ 3 }
 
 extern print_i8(i: i8) i64;
 extern print_i16(i: i16) i64;
-extern print_i32(i: i32) i64;
+// extern print_i32(i: i32) i64;
 // extern print_i64(i: i64) i64;
 
 enum Token {

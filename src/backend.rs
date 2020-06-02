@@ -92,6 +92,7 @@ pub struct Backend<'a, 'b> {
     pub funcs: BTreeMap<Sym, FuncId>,
     pub func_sigs: BTreeMap<Sym, Signature>,
     pub generation: u32,
+    pub data_map: BTreeMap<Id, CraneliftValue>,
 }
 
 impl<'a, 'b> Backend<'a, 'b> {
@@ -122,6 +123,7 @@ impl<'a, 'b> Backend<'a, 'b> {
             funcs: BTreeMap::new(),
             func_sigs: BTreeMap::new(),
             generation: 0,
+            data_map: BTreeMap::new(),
         }
     }
 
@@ -477,7 +479,6 @@ impl<'a, 'b> Backend<'a, 'b> {
                     current_block: ebb,
                     dynamic_fn_ptr_decl: dfp_decl,
                     push_token_decl,
-                    data_map: BTreeMap::new(),
                 };
 
                 for stmt in fb.backend.semantic.parser.id_vec(stmts).clone() {
@@ -491,6 +492,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 self.module.define_function(func, &mut ctx).unwrap();
                 self.module.clear_context(&mut ctx);
+                self.data_map.clear();
 
                 self.module.finalize_definitions();
 
@@ -756,25 +758,12 @@ fn get_string_literal_data_ids(
     string_literal_data_ids
 }
 
-// fn get_cranelift_type(semantic: &Semantic, id: Id) -> Result<types::Type, CompileError> {
-//     let range = semantic.parser.ranges[id];
-
-//     let ty = semantic
-//         .types
-//         .get(id)
-//         .ok_or(CompileError::from_string("Type not found", range))?;
-
-//         .try_into()
-//         .map_err(|e| CompileError::from_string(String::from(e), range))
-// }
-
 pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub backend: &'a mut Backend<'b, 'c>,
     pub builder: FunctionBuilder<'d>,
     pub current_block: Ebb,
     pub dynamic_fn_ptr_decl: FuncRef,
     pub push_token_decl: FuncRef,
-    pub data_map: BTreeMap<Id, CraneliftValue>,
 }
 
 impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
@@ -1664,7 +1653,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let mut data_ctx = DataContext::new();
         data_ctx.define_zeroinit(bytes as usize);
 
-        self.backend.module.define_data(data_id, &data_ctx).unwrap();
+        self.backend.module.define_data(data_id, &data_ctx);
 
         let ptr = self
             .backend
@@ -1674,16 +1663,6 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         self.builder
             .ins()
             .symbol_value(self.backend.module.isa().pointer_type(), ptr)
-
-        // HACK
-        // let slot = self.builder.create_stack_slot(StackSlotData {
-        //     kind: StackSlotKind::ExplicitSlot,
-        //     size: bytes,
-        //     offset: None,
-        // });
-        // self.builder
-        //     .ins()
-        //     .stack_addr(self.backend.module.isa().pointer_type(), slot, 0)
     }
 
     fn declare_global_data_with_bytes(&mut self, name: &str, bytes: Box<[u8]>) -> CraneliftValue {
@@ -1712,7 +1691,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
     }
 
     fn get_global_ptr_to_type_of(&mut self, id: Id) -> CraneliftValue {
-        if let Some(value) = self.data_map.get(&id) {
+        if let Some(value) = self.backend.data_map.get(&id) {
             return *value;
         }
 
@@ -1741,7 +1720,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             _ => todo!("support #type_of for other types: {:?}", ty),
         };
         let dest_addr = self.declare_global_data_with_size(&format!("{}_typeof", id), struct_size);
-        self.data_map.insert(id, dest_addr);
+        self.backend.data_map.insert(id, dest_addr);
 
         // store the tag
         let tag = self.builder.ins().iconst(types::I16, tag);
