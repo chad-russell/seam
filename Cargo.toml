@@ -1,5 +1,5 @@
 [package]
-name = "flea"
+name = "cpi"
 version = "0.1.0"
 authors = ["Chad Russell <chad@theexperienceengine.com>"]
 edition = "2018"

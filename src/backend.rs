@@ -618,25 +618,25 @@ impl<'a, 'b> Backend<'a, 'b> {
             Token::DoubleRAngle => 7,
             Token::LAngle => 8,
             Token::RAngle => 9,
-            Token::Semicolon => 10,
-            Token::Colon => 11,
-            Token::Bang => 12,
-            Token::Dot => 13,
-            Token::Asterisk => 14,
-            Token::EqEq => 15,
-            Token::Neq => 16,
-            Token::Add => 17,
-            Token::Sub => 18,
-            Token::Mul => 19,
-            Token::Div => 20,
-            Token::Eq => 21,
-            Token::Comma => 22,
-            Token::Struct => 23,
-            Token::Enum => 24,
-            Token::Fn => 25,
-            Token::Macro => 26,
-            Token::Extern => 27,
-            Token::Tokens => 28,
+            Token::Return => 10,
+            Token::Semicolon => 11,
+            Token::Colon => 12,
+            Token::Bang => 13,
+            Token::Dot => 14,
+            Token::Asterisk => 15,
+            Token::EqEq => 16,
+            Token::Neq => 17,
+            Token::Add => 18,
+            Token::Sub => 19,
+            Token::Mul => 20,
+            Token::Div => 21,
+            Token::Eq => 22,
+            Token::Comma => 23,
+            Token::Struct => 24,
+            Token::Enum => 25,
+            Token::Fn => 26,
+            Token::Macro => 27,
+            Token::Extern => 28,
             Token::TypeOf => 29,
             Token::Cast => 30,
             Token::If => 31,
@@ -1709,14 +1709,15 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             Type::Basic(BasicType::I16) => 1,
             Type::Basic(BasicType::I32) => 2,
             Type::Basic(BasicType::I64) => 3,
-            Type::Basic(BasicType::F32) => 4,
-            Type::Basic(BasicType::F64) => 5,
-            Type::String => 6,
-            Type::Pointer(_) => 7,
-            Type::Array(_) => 8,
-            Type::Struct { .. } => 9,
-            Type::Enum { .. } => 10,
-            Type::Func { .. } => 11,
+            Type::Basic(BasicType::Bool) => 4,
+            Type::Basic(BasicType::F32) => 5,
+            Type::Basic(BasicType::F64) => 6,
+            Type::String => 7,
+            Type::Pointer(_) => 8,
+            Type::Array(_) => 9,
+            Type::Struct { .. } => 10,
+            Type::Enum { .. } => 11,
+            Type::Func { .. } => 12,
             _ => todo!("support #type_of for other types: {:?}", ty),
         };
         let dest_addr = self.declare_global_data_with_size(&format!("{}_typeof", id), struct_size);
@@ -2147,62 +2148,62 @@ fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) 
             tokens.push(Lexeme::new(Token::RAngle, Range::default()));
         } // RAngle,
         10 => {
+            tokens.push(Lexeme::new(Token::Return, Range::default()));
+        } // RAngle,
+        11 => {
             tokens.push(Lexeme::new(Token::Semicolon, Range::default()));
         } // Semicolon,
-        11 => {
+        12 => {
             tokens.push(Lexeme::new(Token::Colon, Range::default()));
         } // Colon,
-        12 => {
+        13 => {
             tokens.push(Lexeme::new(Token::Bang, Range::default()));
         } // Bang,
-        13 => {
+        14 => {
             tokens.push(Lexeme::new(Token::Dot, Range::default()));
         } // Dot,
-        14 => {
+        15 => {
             tokens.push(Lexeme::new(Token::Asterisk, Range::default()));
         } // Asterisk,
-        15 => {
+        16 => {
             tokens.push(Lexeme::new(Token::EqEq, Range::default()));
         } // EqEq,
-        16 => {
+        17 => {
             tokens.push(Lexeme::new(Token::Neq, Range::default()));
         } // Neq,
-        17 => {
+        18 => {
             tokens.push(Lexeme::new(Token::Add, Range::default()));
         } // Add,
-        18 => {
+        19 => {
             tokens.push(Lexeme::new(Token::Sub, Range::default()));
         } // Sub,
-        19 => {
+        20 => {
             tokens.push(Lexeme::new(Token::Mul, Range::default()));
         } // Mul,
-        20 => {
+        21 => {
             tokens.push(Lexeme::new(Token::Div, Range::default()));
         } // Div,
-        21 => {
+        22 => {
             tokens.push(Lexeme::new(Token::Eq, Range::default()));
         } // Eq,
-        22 => {
+        23 => {
             tokens.push(Lexeme::new(Token::Comma, Range::default()));
         } // Comma,
-        23 => {
+        24 => {
             tokens.push(Lexeme::new(Token::Struct, Range::default()));
         } // Struct,
-        24 => {
+        25 => {
             tokens.push(Lexeme::new(Token::Enum, Range::default()));
         } // Enum,
-        25 => {
+        26 => {
             tokens.push(Lexeme::new(Token::Fn, Range::default()));
         } // Fn,
-        26 => {
+        27 => {
             tokens.push(Lexeme::new(Token::Macro, Range::default()));
         } // Macro,
-        27 => {
+        28 => {
             tokens.push(Lexeme::new(Token::Extern, Range::default()));
         } // Extern,
-        28 => {
-            tokens.push(Lexeme::new(Token::Tokens, Range::default()));
-        } // Tokens_,
         29 => {
             tokens.push(Lexeme::new(Token::TypeOf, Range::default()));
         } // TypeOf,
