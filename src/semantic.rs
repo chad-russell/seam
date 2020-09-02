@@ -198,7 +198,7 @@ impl<'a> Semantic<'a> {
                         }
                         _ => {
                             return Err(CompileError::from_string(
-                                "Valid fields on strings are 'len' or 'buf'",
+                                "Valid fields on strings are 'len' or 'ptr'",
                                 self.parser.ranges[id],
                             ))
                         }
@@ -220,7 +220,7 @@ impl<'a> Semantic<'a> {
                         }
                         _ => {
                             return Err(CompileError::from_string(
-                                "Valid fields on strings are 'len' or 'buf'",
+                                "Valid fields on arrays are 'len' or 'ptr'",
                                 self.parser.ranges[id],
                             ))
                         }
@@ -526,9 +526,6 @@ impl<'a> Semantic<'a> {
                         self.assign_type(array_ty)?;
                         self.types[id] = ty;
                     }
-                    Type::Tokens => {
-                        self.types[id] = ty;
-                    }
                     Type::Unassigned => unreachable!(),
                 }
 
@@ -757,10 +754,6 @@ impl<'a> Semantic<'a> {
                 self.assign_type(expr)?;
                 self.parser.node_is_addressable[id] = self.parser.node_is_addressable[expr];
 
-                Ok(())
-            }
-            Node::MakeTokens => {
-                self.types[id] = Type::Tokens;
                 Ok(())
             }
             _ => Err(CompileError::from_string(
@@ -1030,7 +1023,6 @@ impl<'a> Semantic<'a> {
             (Type::Array(at1), Type::Array(at2)) => {
                 self.match_types(at1, at2)?;
             }
-            (Type::Tokens, Type::Tokens) => (),
             (Type::String, Type::String) => (),
             (Type::Basic(bt1), Type::Basic(bt2)) if bt1 == bt2 => (),
             (Type::Basic(BasicType::IntLiteral), Type::Basic(bt)) => {
@@ -1204,6 +1196,9 @@ impl<'a> Semantic<'a> {
     }
 
     pub fn scope_get(&self, sym: Sym, id: Id) -> Result<Id, CompileError> {
+        if id == 602 {
+            let _stopme = 3;
+        }
         self.parser.scope_get(sym, id).ok_or_else(|| {
             CompileError::from_string(
                 format!(

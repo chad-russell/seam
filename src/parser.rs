@@ -84,7 +84,6 @@ pub enum BasicType {
 pub enum Type {
     Unassigned,
     Basic(BasicType),
-    Tokens,
     Pointer(Id),
     String,
     Func {
@@ -180,7 +179,6 @@ pub enum Token {
     Fn,
     Macro,
     Extern,
-    Tokens,
     TypeOf,
     Cast,
     Let,
@@ -458,9 +456,6 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix_keyword("#make_tokens", Token::MakeTokens) {
-            return;
-        }
-        if self.prefix_keyword("Tokens", Token::Tokens) {
             return;
         }
         if self.prefix_keyword("none", Token::None) {
@@ -1051,12 +1046,6 @@ impl<'a> Parser<'a> {
                         copied_from: None,
                     }),
                 ))
-            }
-            Token::Tokens => {
-                let range = self.lexer.top.range;
-                self.lexer.pop(); // `Tokens`
-
-                Ok(self.push_node(range, Node::TypeLiteral(Type::Tokens)))
             }
             Token::Struct => {
                 let start = self.lexer.top.range.start;

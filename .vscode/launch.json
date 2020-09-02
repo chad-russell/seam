@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'flea'",
+            "name": "Debug executable 'cpi'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=flea",
-                    "--package=flea"
+                    "--bin=cpi",
+                    "--package=cpi"
                 ],
                 "filter": {
-                    "name": "flea",
+                    "name": "cpi",
                     "kind": "bin"
                 }
             },

@@ -2,7 +2,6 @@
 
 ## Definitely Implement
 
-- [ ] structs as function parameters
 - [ ] integer promotions
 - [ ] import other files / modules
 - [ ] switch on enums
@@ -11,17 +10,16 @@
 - [ ] f32/f64
 - [ ] defer
 - [ ] check enum tag when accessing through a field
+- [ ] array bounds checking
 - [ ] passing named params out of order, default params, unnamed params for structs
 - [ ] auto-declaration of poly variables -> inline anonymous functions -> lambdas
 - [ ] if as value expression
 - [ ] short-circuit logical `and` and `or`
-- [ ] for (with macros?)
+- [ ] for (with macros? or traits?)
 - [ ] structs as function parameters / return values
 - [ ] annotation for functions to follow C ABI
 - [ ] unsigned integers
 - [ ] handle empty / no return type
-- [ ] get rid of 'Tokens' concept. Just take a []Token and return a []Token instead
-    - [x] until we have struct parameters / returns, take a *[]Token and return a *[]Token
 - [ ] traits (?)
 
 ## Optimization

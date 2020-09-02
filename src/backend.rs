@@ -559,6 +559,7 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let tokens = self.semantic.parser.token_vecs[tokens_id.0 as usize].clone();
                 self.semantic.parser.lexer.macro_tokens = Some(tokens);
                 self.semantic.parser.top_scope = self.semantic.parser.node_scopes[id];
+                self.semantic.parser.copying = false; // Macro-generated code doesn't count as copying
                 self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Range::default());
                 self.semantic.parser.lexer.second = Lexeme::new(Token::Eof, Range::default());
                 self.semantic.parser.lexer.pop();
@@ -1958,7 +1959,6 @@ pub fn into_cranelift_type(backend: &Backend, id: Id) -> Result<types::Type, Com
         Type::Struct { params, .. } if backend.semantic.parser.id_vec(*params).is_empty() => {
             unreachable!()
         }
-        Type::Tokens => Ok(types::I64), // just the index into token_vecs
         _ => Err(CompileError::from_string(
             format!("Could not convert type {:?}", ty),
             range,
@@ -1976,7 +1976,6 @@ pub fn type_size(semantic: &Semantic, module: &Module<SimpleJITBackend>, id: Id)
         Type::Basic(BasicType::I64) => 8,
         Type::Basic(BasicType::F32) => 4,
         Type::Basic(BasicType::F64) => 8,
-        Type::Tokens => 8,
         Type::Pointer(_) => module.isa().pointer_bytes() as _,
         Type::Func { .. } => module.isa().pointer_bytes() as _,
         Type::Struct { params, .. } | Type::StructLiteral(params) => semantic
