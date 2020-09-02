@@ -409,8 +409,19 @@ impl<'a, 'b> Backend<'a, 'b> {
                 let mut sig = self.module.make_signature();
 
                 for param in self.semantic.parser.id_vec(params) {
-                    sig.params
-                        .push(AbiParam::new(into_cranelift_type(&self, *param)?));
+                    match self.semantic.types[*param] {
+                        Type::Struct { .. }
+                        | Type::Enum { .. }
+                        | Type::String
+                        | Type::Array(..) => {
+                            // todo!("Struct function param type detected!");
+                            sig.params.push(AbiParam::new(types::I64));
+                        }
+                        _ => {
+                            sig.params
+                                .push(AbiParam::new(into_cranelift_type(&self, *param)?));
+                        }
+                    }
                 }
 
                 let return_size = type_size(&self.semantic, &self.module, return_ty);
@@ -1896,8 +1907,15 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         // Now call indirect
         let mut sig = self.backend.module.make_signature();
         for param in params.iter() {
-            sig.params
-                .push(AbiParam::new(into_cranelift_type(&self.backend, *param)?));
+            match self.backend.semantic.types[*param] {
+                Type::Struct { .. } | Type::Enum { .. } | Type::String | Type::Array(..) => {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                _ => {
+                    sig.params
+                        .push(AbiParam::new(into_cranelift_type(&self.backend, *param)?));
+                }
+            }
         }
 
         if return_size > 0 {
