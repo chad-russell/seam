@@ -2,6 +2,8 @@
 
 ## Definitely Implement
 
+- [x] structs as function parameters 
+- [ ] structs as return values
 - [ ] integer promotions
 - [ ] import other files / modules
 - [ ] switch on enums
@@ -16,7 +18,6 @@
 - [ ] if as value expression
 - [ ] short-circuit logical `and` and `or`
 - [ ] for (with macros? or traits?)
-- [ ] structs as function parameters / return values
 - [ ] annotation for functions to follow C ABI
 - [ ] unsigned integers
 - [ ] handle empty / no return type

@@ -859,6 +859,8 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             let ty = match ty {
                 Type::Struct { .. } => self.backend.module.isa().pointer_type(),
                 Type::Enum { .. } => self.backend.module.isa().pointer_type(),
+                Type::String => self.backend.module.isa().pointer_type(),
+                Type::Array(..) => self.backend.module.isa().pointer_type(),
                 _ => into_cranelift_type(&self.backend, id).unwrap(),
             };
 
