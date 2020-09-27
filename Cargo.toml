@@ -1,15 +1,16 @@
 [package]
-name = "cpi"
+name = "seam"
 version = "0.1.0"
 authors = ["Chad Russell <chad@theexperienceengine.com>"]
 edition = "2018"
 
 [dependencies]
-string-interner = "0.7.1"
-cranelift = "0.56.0"
-cranelift-module = "0.56.0"
-cranelift-simplejit = "0.56.0"
+string-interner = "0.12.0"
 lazy_static = "1.4.0"
+cranelift = "0.67.0"
+cranelift-module = "0.67.0"
+cranelift-simplejit = "0.67.0"
+crossterm = "0.17.7"
 
 # [profile.release]
 # debug = true

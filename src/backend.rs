@@ -8,7 +8,7 @@ use cranelift::codegen::ir::{
     condcodes::IntCC, FuncRef, MemFlags, Signature, StackSlotData, StackSlotKind,
 };
 use cranelift::prelude::{
-    types, AbiParam, Ebb, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
+    types, AbiParam, Block, ExternalName, FunctionBuilder, FunctionBuilderContext, InstBuilder,
     Value as CraneliftValue,
 };
 use cranelift_module::{default_libcall_names, DataContext, DataId, FuncId, Linkage, Module};
@@ -156,6 +156,27 @@ impl<'a, 'b> Backend<'a, 'b> {
         Ok(())
     }
 
+    pub fn append_source(&mut self, source: &str) {
+        // TODO(chad): leak. Store this somewhere more official in `backend`
+        let bs = Box::new(String::from(source));
+        let bs = Box::leak(bs);
+
+        self.semantic.parser.lexer.source = &*bs;
+        self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Default::default());
+        self.semantic.parser.lexer.second = Lexeme::new(Token::Eof, Default::default());
+        self.semantic.parser.lexer.pop();
+        self.semantic.parser.lexer.pop();
+
+        // TODO(chad): leak. Maybe original_source should just be a `String`?
+        let bs = Box::new(format!(
+            "{}{}",
+            self.semantic.parser.lexer.source_info.original_source, &*bs
+        ));
+        let bs = Box::leak(bs);
+
+        self.semantic.parser.lexer.source_info.original_source = &*bs;
+    }
+
     pub fn generate_macro_call_order(
         &self,
         call_id: Id,
@@ -260,11 +281,14 @@ impl<'a, 'b> Backend<'a, 'b> {
         Ok(())
     }
 
-    pub fn bootstrap_to_semantic(source: &str) -> Result<Semantic, CompileError> {
+    pub fn bootstrap_to_semantic(
+        source_name: String,
+        source: &str,
+    ) -> Result<Semantic, CompileError> {
         FUNC_PTRS.lock().unwrap().clear();
 
         // let now = std::time::Instant::now();
-        let mut parser = Parser::new(&source);
+        let mut parser = Parser::new(source_name, &source);
         parser.parse()?;
         // let elapsed = now.elapsed();
         // println!(
@@ -354,6 +378,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         //     .keys()
         //     .map(|k| self.semantic.parser.lexer.resolve_unchecked(*k))
         //     .collect::<Vec<_>>());
+
         let f: fn() -> i64 = unsafe {
             std::mem::transmute(
                 (FUNC_PTRS.lock().unwrap())
@@ -446,9 +471,9 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 let mut func_ctx = FunctionBuilderContext::new();
                 let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-                let ebb = builder.create_ebb();
+                let ebb = builder.create_block();
                 builder.switch_to_block(ebb);
-                builder.append_ebb_params_for_function_params(ebb);
+                builder.append_block_params_for_function_params(ebb);
 
                 let dfp_decl = {
                     let mut sig = self.module.make_signature();
@@ -501,7 +526,13 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 // println!("{}", ctx.func.display(None));
 
-                self.module.define_function(func, &mut ctx).unwrap();
+                self.module
+                    .define_function(
+                        func,
+                        &mut ctx,
+                        &mut cranelift::codegen::binemit::NullTrapSink {},
+                    )
+                    .unwrap();
                 self.module.clear_context(&mut ctx);
                 self.data_map.clear();
 
@@ -599,11 +630,13 @@ impl<'a, 'b> Backend<'a, 'b> {
                 self.values[id] = Value::None;
                 Ok(())
             }
-            Node::Extern { .. } => Ok(()),
-            _ => Err(CompileError::from_string(
-                format!("Unhandled node: {}", self.semantic.parser.debug(id)),
-                self.semantic.parser.ranges[id],
-            )),
+            // TODO(chad): is this safe??
+            _ => Ok(()),
+            // Node::Extern { .. } => Ok(()),
+            // _ => Err(CompileError::from_string(
+            //     format!("Unhandled node: {}", self.semantic.parser.debug(id)),
+            //     self.semantic.parser.ranges[id],
+            // )),
         }
     }
 
@@ -738,7 +771,13 @@ fn get_string_literal_data_ids(
     for lit in semantic.parser.string_literals.clone() {
         // declare data section for string literals
         let string_literal_data_id = module
-            .declare_data(&format!("str_lit_{}", lit), Linkage::Local, false, None)
+            .declare_data(
+                &format!("str_lit_{}", lit),
+                Linkage::Local,
+                false, // writable
+                false, // tls
+                None,
+            )
             .unwrap();
 
         let mut data_ctx = DataContext::new();
@@ -773,7 +812,7 @@ fn get_string_literal_data_ids(
 pub struct FunctionBackend<'a, 'b, 'c, 'd> {
     pub backend: &'a mut Backend<'b, 'c>,
     pub builder: FunctionBuilder<'d>,
-    pub current_block: Ebb,
+    pub current_block: Block,
     pub dynamic_fn_ptr_decl: FuncRef,
     pub push_token_decl: FuncRef,
 }
@@ -843,13 +882,14 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let source_value = self.as_value(id);
         let dest_value = dest.as_value_relaxed(self);
 
-        self.builder.emit_small_memcpy(
+        self.builder.emit_small_memory_copy(
             self.backend.module.isa().frontend_config(),
             dest_value,
             source_value,
             size as _,
             1,
             1,
+            true, // non-overlapping
         );
     }
 
@@ -857,10 +897,9 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         if self.backend.rvalue_is_ptr(id) {
             let ty = &self.backend.semantic.types[id];
             let ty = match ty {
-                Type::Struct { .. } => self.backend.module.isa().pointer_type(),
-                Type::Enum { .. } => self.backend.module.isa().pointer_type(),
-                Type::String => self.backend.module.isa().pointer_type(),
-                Type::Array(..) => self.backend.module.isa().pointer_type(),
+                Type::Struct { .. } | Type::Enum { .. } | Type::String | Type::Array(..) => {
+                    self.backend.module.isa().pointer_type()
+                }
                 _ => into_cranelift_type(&self.backend, id).unwrap(),
             };
 
@@ -1212,19 +1251,19 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.compile_id(cond)?;
                 let cond = self.rvalue(cond);
 
-                let true_block = self.builder.create_ebb();
+                let true_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(true_block);
+                    .append_block_params_for_function_params(true_block);
 
-                let false_block = self.builder.create_ebb();
+                let false_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(false_block);
+                    .append_block_params_for_function_params(false_block);
 
-                let cont_block = self.builder.create_ebb();
+                let cont_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(cont_block);
+                    .append_block_params_for_function_params(cont_block);
 
-                let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                let current_params = self.builder.block_params(self.current_block).to_owned();
 
                 self.builder.ins().brnz(cond, true_block, &current_params);
                 self.builder.ins().jump(false_block, &current_params);
@@ -1238,7 +1277,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         self.compile_id(stmt)?;
                     }
 
-                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                    let current_params = self.builder.block_params(self.current_block).to_owned();
                     self.builder.ins().jump(cont_block, &current_params);
                 }
 
@@ -1251,7 +1290,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         self.compile_id(stmt)?;
                     }
 
-                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                    let current_params = self.builder.block_params(self.current_block).to_owned();
                     self.builder.ins().jump(cont_block, &current_params);
                 }
 
@@ -1261,20 +1300,20 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 Ok(())
             }
             Node::While { cond, stmts } => {
-                let check_block = self.builder.create_ebb();
+                let check_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(check_block);
+                    .append_block_params_for_function_params(check_block);
 
-                let true_block = self.builder.create_ebb();
+                let true_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(true_block);
+                    .append_block_params_for_function_params(true_block);
 
-                let cont_block = self.builder.create_ebb();
+                let cont_block = self.builder.create_block();
                 self.builder
-                    .append_ebb_params_for_function_params(cont_block);
+                    .append_block_params_for_function_params(cont_block);
 
                 // put the check and branch inside a block
-                let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                let current_params = self.builder.block_params(self.current_block).to_owned();
                 self.builder.ins().jump(check_block, &current_params);
                 self.builder.switch_to_block(check_block);
                 self.current_block = check_block;
@@ -1282,7 +1321,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                 self.compile_id(cond)?;
                 let cond = self.rvalue(cond);
 
-                let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                let current_params = self.builder.block_params(self.current_block).to_owned();
                 self.builder.ins().brnz(cond, true_block, &current_params);
                 self.builder.ins().jump(cont_block, &current_params);
 
@@ -1295,7 +1334,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                         self.compile_id(stmt)?;
                     }
 
-                    let current_params = self.builder.ebb_params(self.current_block).to_owned();
+                    let current_params = self.builder.block_params(self.current_block).to_owned();
                     self.builder.ins().jump(check_block, &current_params);
                 }
 
@@ -1389,7 +1428,7 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
                     );
                     let value = Value::Value(slot_addr);
 
-                    let params = self.builder.ebb_params(self.current_block);
+                    let params = self.builder.block_params(self.current_block);
                     let param_value = params[index as usize];
                     self.builder
                         .ins()
@@ -1661,7 +1700,13 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let data_id = self
             .backend
             .module
-            .declare_data(name, Linkage::Local, true, None)
+            .declare_data(
+                name,
+                Linkage::Local,
+                true,  // writable
+                false, // tls
+                None,
+            )
             .unwrap();
 
         let mut data_ctx = DataContext::new();
@@ -1683,7 +1728,13 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
         let data_id = self
             .backend
             .module
-            .declare_data(name, Linkage::Local, true, None)
+            .declare_data(
+                name,
+                Linkage::Local,
+                true,  // writable
+                false, // tls
+                None,
+            )
             .unwrap();
 
         let mut data_ctx = DataContext::new();
@@ -1852,13 +1903,14 @@ impl<'a, 'b, 'c, 'd> FunctionBackend<'a, 'b, 'c, 'd> {
             .builder
             .ins()
             .iadd_imm(dest_addr, ENUM_TAG_SIZE_BYTES as i64);
-        self.builder.emit_small_memcpy(
+        self.builder.emit_small_memory_copy(
             self.backend.module.isa().frontend_config(),
             dest_addr,
             array_ptr,
             16,
             1,
             1,
+            true, // non-overlapping
         );
     }
 

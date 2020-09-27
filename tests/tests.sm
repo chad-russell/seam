@@ -1,5 +1,10 @@
-extern print_string(len: i64, ptr: *i8) i64;
 extern alloc(bytes: i64) *struct{};
+
+extern print_i8(i: i8) i64;
+extern print_i16(i: i16) i64;
+extern print_i32(i: i32) i64;
+extern print_i64(i: i64) i64;
+extern print_string(len: i64, ptr: *i8) i64;
 
 fn print_str(s: *string) i64 {
     print_string(s.len, s.ptr);
@@ -61,35 +66,32 @@ fn alloc_array<T: Type>(item_count: i64) *[]T {
 // }
 // mac_test_2!{ 3 }
 
-// macro mac_foo(t: *[]Token) *[]Token {
-//     let pc: []Token = []{
-//         { Fn: {} },
-//         { Symbol: "macro_generated_foo" },
-//         { LParen: {} },
-//         { RParen: {}, },
-//         { LCurly: {}, },
-//         { Return: {} },
-//         // { IntegerLiteral: 3 },
-//         (^t)[0],
-//         { Semicolon: {} },
-//         { RCurly: {} },
-//     };
+macro mac_foo(t: *[]Token) *[]Token {
+    let pc: []Token = []{
+        { Fn: {} },
+        { Symbol: "macro_generated_foo" },
+        { LParen: {} },
+        { RParen: {}, },
+        { LCurly: {}, },
+        { Return: {} },
+        // { IntegerLiteral: 3 },
+        (^t)[0],
+        { Semicolon: {} },
+        { RCurly: {} },
+    };
 
-//     let p: *[]Token = alloc_array(pc.len);
+    let p: *[]Token = alloc_array(pc.len);
 
-//     let i = 0;
-//     while i < pc.len {
-//         (^p)[i] = pc[i];
-//         i = i + 1;
-//     }
+    let i = 0;
+    while i < pc.len {
+        (^p)[i] = pc[i];
+        i = i + 1;
+    }
 
-//     return p;
-// }
+    return p;
+}
 
-extern print_i8(i: i8) i64;
-extern print_i16(i: i16) i64;
-extern print_i32(i: i32) i64;
-extern print_i64(i: i64) i64;
+mac_foo!{ 47 }
 
 enum Token {
     LParen,
@@ -140,6 +142,14 @@ enum Token {
     IntegerLiteral: i64, // todo(chad): specification
     FloatLiteral: f64, // todo(chad): specification
     StringLiteral: string,
+}
+
+enum EFoo {
+    i: i64,
+    b: bool,
+    s: string,
+    q: struct { x: i64, y: i64 },
+    x: struct { val: i64, next: *EFoo },
 }
 
 enum Ty {
@@ -242,29 +252,121 @@ fn ty_size(ty: *Ty) i64 {
     return size;
 }
 
-// fn fuck<T: Type>() T {
-//     let t: T = ---;
-//     return t;
-// }
+fn uninit<T: Type>() T {
+    let t: T = ---;
+    return t;
+}
 
-// mac_foo!{ 4 }
-
-fn foo<T: Type>(x: []T) i64 {
+fn array_len<T: Type>(x: []T) i64 {
     return x.len;
 }
 
-fn main() i64 {
-    // print(&"hello\n");
-    // let a: i64 = 43;
-    // print(&a);
-    // let b = false;
-    // print(&b);
-    // print(&true);
+// import "foo";
 
-    return old_tests();
-    // return fuck();
+fn main() i64 {
+    // return old_tests();
 
     // return macro_generated_foo();
+
+    // let p: Point = { x: 15, y: 99 };
+    // print_ty(&#type_of(p));
+
+    // TODO(chad): check field names!! (`nexxxt` is not a valid field)
+    // let ef: EFoo = { x: { val: 22, nexxxt: &{ i: 15 } } };
+    // print_ty(&#type_of(ef));
+    // print_str(&"\n");
+
+    // return ef.x.next.i;
+
+    return 0;
+}
+
+fn print_ty(ty: *Ty) i64 {
+    let tag = enum_tag(ty);
+
+    let size = 0;
+    if tag == 0 {
+        // i8
+        print_str(&"i8");
+    }
+    if tag == 1 {
+        // i16
+        print_str(&"i16");
+    }
+    if tag == 2 {
+        // i32
+        print_str(&"i32");
+    }
+    if tag == 3 {
+        // i64
+        print_str(&"i64");
+    }
+    if tag == 4 {
+        // bool
+        print_str(&"bool");
+    }
+    if tag == 5 {
+        // f32
+        print_str(&"f32");
+    }
+    if tag == 6 {
+        // f64
+        print_str(&"f64");
+    }
+    if tag == 7 {
+        // string
+        print_str(&"string");
+    }
+    if tag == 8 {
+        // pointer
+        print_str(&"*");
+        // print_ty(ty.Pointer);
+    }
+    if tag == 9 {
+        // array
+        print_str(&"[]");
+        print_ty(ty.Array);
+    }
+    if tag == 10 {
+        // struct
+        let field_index = 0;
+        print_str(&"struct {");
+        while field_index < ty.Struct.len {
+            print_str(&ty.Struct[field_index].name);
+            print_str(&": ");
+            print_ty(ty.Struct[field_index].ty);
+            print_str(&", ");
+            field_index = field_index + 1;
+        }
+        print_str(&"}");
+    }
+    if tag == 11 {
+        // enum
+        let field_index = 0;
+        print_str(&"enum {");
+        while field_index < ty.Struct.len {
+            print_str(&ty.Struct[field_index].name);
+            print_str(&": ");
+            print_ty(ty.Struct[field_index].ty);
+            print_str(&", ");
+            field_index = field_index + 1;
+        }
+        print_str(&"}");
+    }
+    if tag == 12 {
+        // func
+        print_str(&"fn(");
+        let input_index = 0;
+        while input_index < ty.Func.input_types.len {
+            print_ty(&ty.Func.input_types[input_index]);
+            print_str(&", ");
+            input_index = input_index + 1;
+        }
+        print_str(&") ");
+        print_ty(ty.Func.return_ty);
+    }
+
+    return size;
 }
 
 fn enum_tag<T: Type>(e: *T) i16 {
@@ -426,7 +528,7 @@ fn old_tests() i64 {
 
     check(test_fn_ptr(), 2);
     
-    check(cpi_test(), 7);
+    check(seam_test(), 7);
 
     check(baz(), 8);
 
@@ -557,7 +659,7 @@ fn test_fn_ptr() i64 {
     return f(2);
 }
 
-fn cpi_test() i64 {
+fn seam_test() i64 {
     let foo: Foo = ---;
     let bar: Bar = ---;
     let baz: Baz = ---;

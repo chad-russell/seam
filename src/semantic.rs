@@ -756,6 +756,7 @@ impl<'a> Semantic<'a> {
 
                 Ok(())
             }
+            Node::Import { .. } => Ok(()),
             _ => Err(CompileError::from_string(
                 format!(
                     "Cannot coerce type for AST node {:?}",
@@ -795,8 +796,8 @@ impl<'a> Semantic<'a> {
         // println!("deep copying function");
 
         let range = self.parser.ranges[id];
-        let source =
-            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+        let source = &self.parser.lexer.source_info.original_source
+            [range.start.char_offset..range.end.char_offset];
 
         self.parser
             .lexer
@@ -836,8 +837,8 @@ impl<'a> Semantic<'a> {
         // println!("copying struct!");
 
         let range = self.parser.ranges[id];
-        let source =
-            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+        let source = &self.parser.lexer.source_info.original_source
+            [range.start.char_offset..range.end.char_offset];
 
         self.parser
             .lexer
@@ -857,8 +858,8 @@ impl<'a> Semantic<'a> {
         // println!("copying enum!");
 
         let range = self.parser.ranges[id];
-        let source =
-            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+        let source = &self.parser.lexer.source_info.original_source
+            [range.start.char_offset..range.end.char_offset];
 
         self.parser
             .lexer
@@ -893,8 +894,8 @@ impl<'a> Semantic<'a> {
         };
 
         let range = self.parser.ranges[id];
-        let source =
-            &self.parser.lexer.original_source[range.start.char_offset..range.end.char_offset];
+        let source = &self.parser.lexer.source_info.original_source
+            [range.start.char_offset..range.end.char_offset];
 
         self.parser
             .lexer

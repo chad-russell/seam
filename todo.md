@@ -2,10 +2,21 @@
 
 ## Definitely Implement
 
-- [x] structs as function parameters 
-- [ ] structs as return values
+- [ ] module system
+    - simple namespacing
+    - for 
+- [ ] more compiler info for a given node (similar to #type_of info)
+    - [ ] basically, this boils down to exposing the backend/semantic/parser/lexer infos with some collection of extern functions. Then, all we have to do is have a function to get the id of a node and then everything should be available
+- [ ] macros should not recieve an array of tokens. Instead, they should receive a node id.
+    - the stream of tokens (as well as lots of other good info) can be had from the compiler
+- [ ] global values
+    - Declaring things at top-level is tricky. For example, what happens if someone declares a struct type, then adds a top-level value of that type, then changes the struct's type definition? What happens if there are functions that reference the struct type in the argument list or function body?
+        - one strategy is to add a prelude to every struct member access to ensure the type is what you think it is. If not, then some kind of a panic/exception could be raised. Obviously this could be disabled for performance reasons if desired.
+        - another strategy would be to provide two ways of recompiling -- recompile only function/type/extern declarations, and recompile everything (including top-level statements about global values).
+- [ ] garbage collection
+    - concurrent, parallel, non-moving tricolor mark/sweep
 - [ ] integer promotions
-- [ ] import other files / modules
+- [ ] structs as return values
 - [ ] switch on enums
     - [ ] check cases are exhaustive
 - [ ] debugging
@@ -30,9 +41,7 @@
       - If yes and there's already an entry, we are done
       - If no, then copy the body, then do codegen and see if there's an entry
 
-
 ## Maybe Implement
 
-- [ ] compile-time function calls `#run()`
 - [ ] baked functions (`let f = poly<i64>;` and then use f as a function pointer)
-- [ ] baked funciton values (making a version of a function where one or more parameters are compile-time known)
+- [ ] baked function values (making a version of a function where one or more parameters are compile-time known)

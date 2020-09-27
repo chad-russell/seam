@@ -174,6 +174,7 @@ pub enum Token {
     Div,
     Eq,
     Comma,
+    Import,
     Struct,
     Enum,
     Fn,
@@ -201,7 +202,6 @@ pub enum Token {
     Type,
     Caret,
     Uninit,
-    MakeTokens,
     Symbol(Sym),
     IntegerLiteral(i64, NumericSpecification), // TODO: handle negative literals
     FloatLiteral(f64),                         // TODO: handle negative literals
@@ -224,17 +224,30 @@ impl Lexeme {
 #[derive(Debug)]
 struct PushedScope(Id, bool);
 
+#[derive(Clone)]
 pub struct Lexer<'a> {
+    // TODO(chad): PLAN
+    // - Move string_interner out of lexer
+    // - Make source_info a borrowed member
+    // - Then everything else should be ephemeral
+    // - We can then just spin-up lexers when we need them and throw them away when we're done
+    // - Then, make `lexer` a private field in the `Parser` struct (or remove it entirely and pass functionally to all the parsing methods)
     pub string_interner: Box<StringInterner<Sym>>,
 
+    pub source_info: SourceInfo<'a>,
     pub source: &'a str,
-    pub original_source: &'a str,
     pub loc: Location,
 
     pub macro_tokens: Option<Vec<Lexeme>>,
 
     pub top: Lexeme,
     pub second: Lexeme,
+}
+
+#[derive(Clone)]
+pub struct SourceInfo<'a> {
+    pub source_name: String,
+    pub original_source: &'a str,
 }
 
 fn is_special(c: char) -> bool {
@@ -267,13 +280,16 @@ fn is_special(c: char) -> bool {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source_name: String, source: &'a str) -> Self {
         let string_interner = Box::new(StringInterner::new());
 
         Self {
             string_interner,
-            original_source: source,
-            source,
+            source_info: SourceInfo {
+                source_name,
+                original_source: source,
+            },
+            source: source,
             loc: Default::default(),
             top: Lexeme::new(Token::Eof, Default::default()),
             second: Lexeme::new(Token::Eof, Default::default()),
@@ -455,9 +471,6 @@ impl<'a> Lexer<'a> {
         if self.prefix_keyword("#type_of", Token::TypeOf) {
             return;
         }
-        if self.prefix_keyword("#make_tokens", Token::MakeTokens) {
-            return;
-        }
         if self.prefix_keyword("none", Token::None) {
             return;
         }
@@ -483,6 +496,9 @@ impl<'a> Lexer<'a> {
             return;
         }
         if self.prefix_keyword("f64", Token::F64) {
+            return;
+        }
+        if self.prefix_keyword("import", Token::Import) {
             return;
         }
         if self.prefix_keyword("struct", Token::Struct) {
@@ -688,6 +704,8 @@ pub struct Parser<'a> {
     pub nodes: Vec<Node>,
     pub ranges: Vec<Range>,
 
+    pub source_infos: Vec<SourceInfo<'a>>,
+
     pub node_is_addressable: Vec<bool>,
 
     pub lexer: Lexer<'a>,
@@ -735,7 +753,6 @@ pub struct CompileErrorNote {
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub note: CompileErrorNote,
-    pub extra_notes: Vec<CompileErrorNote>,
 }
 
 impl CompileError {
@@ -745,7 +762,6 @@ impl CompileError {
                 msg: msg.into(),
                 range: range.into(),
             },
-            extra_notes: Default::default(),
         }
     }
 }
@@ -779,10 +795,6 @@ pub enum Node {
     Return(Id),
     Ref(Id),
     Load(Id),
-    // PtrCast {
-    //     ty: Id,
-    //     expr: Id,
-    // },
     Let {
         name: Sym,
         ty: Option<Id>,
@@ -803,6 +815,9 @@ pub enum Node {
         returns: IdVec,
         is_macro: bool,
         copied_from: Option<Id>,
+    },
+    Import {
+        name: Sym,
     },
     Extern {
         name: Sym,
@@ -853,7 +868,6 @@ pub enum Node {
     },
     TypeOf(Id),
     Cast(Id),
-    MakeTokens,
     PushToken(Id, Id),
     EqEq(Id, Id),
     Neq(Id, Id),
@@ -891,11 +905,18 @@ impl Node {
             _ => None,
         }
     }
+
+    pub fn as_string_literal(&self) -> Option<Sym> {
+        match self {
+            Node::StringLiteral { sym, bytes: _ } => Some(*sym),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(string: &'a str) -> Self {
-        let mut lexer = Lexer::new(string);
+    pub fn new(source_name: String, string: &'a str) -> Self {
+        let mut lexer = Lexer::new(source_name.clone(), string);
 
         // pop first two tokens
         lexer.pop();
@@ -916,6 +937,10 @@ impl<'a> Parser<'a> {
 
         Parser {
             lexer,
+            source_infos: vec![SourceInfo {
+                source_name: source_name.clone(),
+                original_source: string,
+            }],
             nodes: Default::default(),
             node_scopes: Default::default(),
             ranges: Default::default(),
@@ -1305,7 +1330,6 @@ impl<'a> Parser<'a> {
                 | Token::TypeOf
                 | Token::LParen
                 | Token::Cast
-                | Token::MakeTokens
                 | Token::Symbol(_)
                 | Token::I8
                 | Token::I16
@@ -1425,26 +1449,7 @@ impl<'a> Parser<'a> {
     pub fn parse_expression_piece(&mut self) -> Result<Id, CompileError> {
         match self.lexer.top.tok {
             Token::IntegerLiteral(_, _) | Token::FloatLiteral(_) => self.parse_numeric_literal(),
-            Token::StringLiteral(sym) => {
-                let range = self.lexer.top.range;
-                self.lexer.pop();
-
-                let bytes = self
-                    .lexer
-                    .string_interner
-                    .resolve(sym)
-                    .unwrap()
-                    .bytes()
-                    .len();
-
-                let string_id = self.push_node(range, Node::StringLiteral { sym, bytes });
-                self.string_literals.push(string_id);
-
-                // structs are always addressable (for now)
-                self.node_is_addressable[string_id] = true;
-
-                Ok(string_id)
-            }
+            Token::StringLiteral(sym) => self.parse_string_literal(sym),
             Token::Ampersand => {
                 let start = self.lexer.top.range.start;
                 self.lexer.pop(); // `&`
@@ -1506,16 +1511,6 @@ impl<'a> Parser<'a> {
 
                 let id = self.push_node(range, Node::TypeOf(expr));
                 self.node_is_addressable[id] = true;
-
-                Ok(id)
-            }
-            Token::MakeTokens => {
-                let start = self.lexer.top.range.start;
-                self.lexer.pop(); // `#make_tokens`
-                self.expect(&Token::LParen)?;
-                let range = self.expect_range(start, Token::RParen)?;
-
-                let id = self.push_node(range, Node::MakeTokens);
 
                 Ok(id)
             }
@@ -1638,6 +1633,27 @@ impl<'a> Parser<'a> {
                 Ok(value)
             }
         }
+    }
+
+    fn parse_string_literal(&mut self, sym: Sym) -> Result<Id, CompileError> {
+        let range = self.lexer.top.range;
+        self.lexer.pop();
+
+        let bytes = self
+            .lexer
+            .string_interner
+            .resolve(sym)
+            .unwrap()
+            .bytes()
+            .len();
+
+        let string_id = self.push_node(range, Node::StringLiteral { sym, bytes });
+        self.string_literals.push(string_id);
+
+        // structs are always addressable (for now)
+        self.node_is_addressable[string_id] = true;
+
+        Ok(string_id)
     }
 
     fn parse_lvalue(&mut self) -> Result<Id, CompileError> {
@@ -2000,10 +2016,27 @@ impl<'a> Parser<'a> {
         Ok(func)
     }
 
+    pub fn parse_repl(&mut self) -> Result<Id, CompileError> {
+        match self.lexer.top.tok {
+            Token::Import
+            | Token::Struct
+            | Token::Enum
+            | Token::Extern
+            | Token::Fn
+            | Token::Macro => {
+                let tl = self.parse_top_level()?;
+                self.top_level.push(tl);
+                Ok(tl)
+            }
+            _ => self.parse_expression(),
+        }
+    }
+
     pub fn parse_top_level(&mut self) -> Result<Id, CompileError> {
         let start = self.lexer.top.range.start;
 
         match self.lexer.top.tok {
+            Token::Import => self.parse_import(start),
             Token::Struct => self.parse_struct(start),
             Token::Enum => self.parse_enum(start),
             Token::Extern => {
@@ -2041,6 +2074,21 @@ impl<'a> Parser<'a> {
             //     self.lexer.top.range,
             // )),
         }
+    }
+
+    pub fn parse_import(&mut self, start: Location) -> Result<Id, CompileError> {
+        self.lexer.pop();
+        let name = match self.lexer.top.tok {
+            Token::StringLiteral(sym) => self.parse_string_literal(sym),
+            _ => Err(CompileError::from_string(
+                "Expected string literal as import target",
+                Range::new(start, self.lexer.top.range.end),
+            )),
+        }?;
+        let name = self.nodes[name].as_string_literal().unwrap();
+
+        let range = self.expect_range(start, Token::Semicolon)?;
+        Ok(self.push_node(range, Node::Import { name }))
     }
 
     pub fn parse_struct(&mut self, start: Location) -> Result<Id, CompileError> {
@@ -2116,7 +2164,8 @@ impl<'a> Parser<'a> {
     pub fn debug(&self, id: Id) -> String {
         let range = self.ranges[id];
 
-        self.lexer.original_source[range.start.char_offset..range.end.char_offset].to_string()
+        self.lexer.source_info.original_source[range.start.char_offset..range.end.char_offset]
+            .to_string()
     }
 
     pub fn id_vec(&self, idv: IdVec) -> &Vec<Id> {
