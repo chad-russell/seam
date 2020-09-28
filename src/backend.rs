@@ -138,10 +138,7 @@ impl<'a, 'b> Backend<'a, 'b> {
         self.semantic.parser.top_scope = 0;
         self.semantic.parser.function_scopes.clear();
 
-        self.semantic
-            .parser
-            .lexer
-            .update_source_for_copy(source, loc);
+        self.semantic.parser.lexers[0].update_source_for_copy(source, loc);
 
         self.semantic.parser.parse()?;
 
@@ -161,20 +158,20 @@ impl<'a, 'b> Backend<'a, 'b> {
         let bs = Box::new(String::from(source));
         let bs = Box::leak(bs);
 
-        self.semantic.parser.lexer.source = &*bs;
-        self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Default::default());
-        self.semantic.parser.lexer.second = Lexeme::new(Token::Eof, Default::default());
-        self.semantic.parser.lexer.pop();
-        self.semantic.parser.lexer.pop();
+        self.semantic.parser.lexers[0].source = &*bs;
+        self.semantic.parser.lexers[0].top = Lexeme::new(Token::Eof, Default::default());
+        self.semantic.parser.lexers[0].second = Lexeme::new(Token::Eof, Default::default());
+        self.semantic.parser.lexers[0].pop();
+        self.semantic.parser.lexers[0].pop();
 
         // TODO(chad): leak. Maybe original_source should just be a `String`?
         let bs = Box::new(format!(
             "{}{}",
-            self.semantic.parser.lexer.source_info.original_source, &*bs
+            self.semantic.parser.lexers[0].source_info.original_source, &*bs
         ));
         let bs = Box::leak(bs);
 
-        self.semantic.parser.lexer.source_info.original_source = &*bs;
+        self.semantic.parser.lexers[0].source_info.original_source = &*bs;
     }
 
     pub fn generate_macro_call_order(
@@ -353,9 +350,7 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 
     pub fn resolve_symbol(&self, sym: Sym) -> String {
-        self.semantic
-            .parser
-            .lexer
+        self.semantic.parser.lexers[0]
             .string_interner
             .resolve(sym)
             .unwrap()
@@ -363,9 +358,7 @@ impl<'a, 'b> Backend<'a, 'b> {
     }
 
     pub fn get_symbol(&self, str: impl Into<String>) -> Sym {
-        self.semantic
-            .parser
-            .lexer
+        self.semantic.parser.lexers[0]
             .string_interner
             .get(str.into())
             .unwrap()
@@ -376,13 +369,15 @@ impl<'a, 'b> Backend<'a, 'b> {
         //     .lock()
         //     .unwrap()
         //     .keys()
-        //     .map(|k| self.semantic.parser.lexer.resolve_unchecked(*k))
+        //     .map(|k| self.semantic.parser.lexers[0].resolve_unchecked(*k))
         //     .collect::<Vec<_>>());
 
         let f: fn() -> i64 = unsafe {
             std::mem::transmute(
-                (FUNC_PTRS.lock().unwrap())
-                    [&self.semantic.parser.lexer.string_interner.get(str).unwrap()],
+                (FUNC_PTRS.lock().unwrap())[&self.semantic.parser.lexers[0]
+                    .string_interner
+                    .get(str)
+                    .unwrap()],
             )
         };
         f()
@@ -599,13 +594,13 @@ impl<'a, 'b> Backend<'a, 'b> {
                 std::mem::forget(result_tokens);
 
                 let tokens = self.semantic.parser.token_vecs[tokens_id.0 as usize].clone();
-                self.semantic.parser.lexer.macro_tokens = Some(tokens);
+                self.semantic.parser.lexers[0].macro_tokens = Some(tokens);
                 self.semantic.parser.top_scope = self.semantic.parser.node_scopes[id];
                 self.semantic.parser.copying = false; // Macro-generated code doesn't count as copying
-                self.semantic.parser.lexer.top = Lexeme::new(Token::Eof, Range::default());
-                self.semantic.parser.lexer.second = Lexeme::new(Token::Eof, Range::default());
-                self.semantic.parser.lexer.pop();
-                self.semantic.parser.lexer.pop();
+                self.semantic.parser.lexers[0].top = Lexeme::new(Token::Eof, Range::default());
+                self.semantic.parser.lexers[0].second = Lexeme::new(Token::Eof, Range::default());
+                self.semantic.parser.lexers[0].pop();
+                self.semantic.parser.lexers[0].pop();
 
                 // println!(
                 //     "received tokens: {:?}",
@@ -621,7 +616,7 @@ impl<'a, 'b> Backend<'a, 'b> {
 
                 self.semantic.assign_type(parsed)?;
 
-                self.semantic.parser.lexer.macro_tokens = None;
+                self.semantic.parser.lexers[0].macro_tokens = None;
 
                 Ok(())
             }
@@ -786,9 +781,7 @@ fn get_string_literal_data_ids(
             Node::StringLiteral { sym, .. } => sym,
             _ => unreachable!(),
         };
-        let lit_str = semantic
-            .parser
-            .lexer
+        let lit_str = semantic.parser.lexers[0]
             .string_interner
             .resolve(lit_sym)
             .unwrap()
@@ -2107,10 +2100,7 @@ fn declare_externs<'a, 'b, 'c>(
                 .push(AbiParam::new(into_cranelift_type(backend, param)?));
         }
 
-        let name = backend
-            .semantic
-            .parser
-            .lexer
+        let name = backend.semantic.parser.lexers[0]
             .string_interner
             .resolve(name)
             .unwrap()
@@ -2326,9 +2316,7 @@ fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) 
                 let s =
                     String::from_raw_parts(bs.data as *mut u8, bs.len as usize, bs.len as usize);
 
-                let sym = semantic
-                    .parser
-                    .lexer
+                let sym = semantic.parser.lexers[0]
                     .string_interner
                     .get_or_intern(s.clone());
                 std::mem::forget(s);
@@ -2354,9 +2342,7 @@ fn push_token(semantic: *mut Semantic, tokens: i64, token: *const BackendToken) 
                 let s =
                     String::from_raw_parts(bs.data as *mut u8, bs.len as usize, bs.len as usize);
 
-                let sym = semantic
-                    .parser
-                    .lexer
+                let sym = semantic.parser.lexers[0]
                     .string_interner
                     .get_or_intern(s.clone());
                 std::mem::forget(s);

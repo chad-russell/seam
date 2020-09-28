@@ -258,16 +258,13 @@ impl<'a> Semantic<'a> {
                     _ => Err(CompileError::from_string(
                         format!(
                             "field '{}' not found: fields are {:?}",
-                            self.parser
-                                .lexer
+                            self.parser.lexers[0]
                                 .string_interner
                                 .resolve(field_name)
                                 .unwrap(),
                             params
                                 .iter()
-                                .map(|(sym, _)| self
-                                    .parser
-                                    .lexer
+                                .map(|(sym, _)| self.parser.lexers[0]
                                     .string_interner
                                     .resolve(*sym)
                                     .unwrap())
@@ -796,12 +793,10 @@ impl<'a> Semantic<'a> {
         // println!("deep copying function");
 
         let range = self.parser.ranges[id];
-        let source = &self.parser.lexer.source_info.original_source
+        let source = &self.parser.lexers[0].source_info.original_source
             [range.start.char_offset..range.end.char_offset];
 
-        self.parser
-            .lexer
-            .update_source_for_copy(source, range.start);
+        self.parser.lexers[0].update_source_for_copy(source, range.start);
         self.parser.copying = true;
 
         let copied = self.parser.parse_fn(range.start).unwrap();
@@ -811,9 +806,7 @@ impl<'a> Semantic<'a> {
             Node::Func { name, .. } => self.parser.resolve_sym_unchecked(*name).to_string(),
             _ => unreachable!(),
         };
-        let new_name = self
-            .parser
-            .lexer
+        let new_name = self.parser.lexers[0]
             .string_interner
             .get_or_intern(format!("{}_{}", old_name, copied));
         match self.parser.nodes.get_mut(copied).unwrap() {
@@ -837,12 +830,10 @@ impl<'a> Semantic<'a> {
         // println!("copying struct!");
 
         let range = self.parser.ranges[id];
-        let source = &self.parser.lexer.source_info.original_source
+        let source = &self.parser.lexers[0].source_info.original_source
             [range.start.char_offset..range.end.char_offset];
 
-        self.parser
-            .lexer
-            .update_source_for_copy(source, range.start);
+        self.parser.lexers[0].update_source_for_copy(source, range.start);
         self.parser.copying = true;
 
         let copied = self.parser.parse_struct(range.start).unwrap();
@@ -858,12 +849,10 @@ impl<'a> Semantic<'a> {
         // println!("copying enum!");
 
         let range = self.parser.ranges[id];
-        let source = &self.parser.lexer.source_info.original_source
+        let source = &self.parser.lexers[0].source_info.original_source
             [range.start.char_offset..range.end.char_offset];
 
-        self.parser
-            .lexer
-            .update_source_for_copy(source, range.start);
+        self.parser.lexers[0].update_source_for_copy(source, range.start);
         self.parser.copying = true;
 
         let copied = self.parser.parse_enum(range.start).unwrap();
@@ -894,12 +883,10 @@ impl<'a> Semantic<'a> {
         };
 
         let range = self.parser.ranges[id];
-        let source = &self.parser.lexer.source_info.original_source
+        let source = &self.parser.lexers[0].source_info.original_source
             [range.start.char_offset..range.end.char_offset];
 
-        self.parser
-            .lexer
-            .update_source_for_copy(source, range.start);
+        self.parser.lexers[0].update_source_for_copy(source, range.start);
         self.parser.top_scope = scope;
         self.parser.copying = true;
 

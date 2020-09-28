@@ -44,7 +44,7 @@ fn repl_loop(backend: &mut Backend, repl_stmt_count: i64) -> Result<(), CompileE
 
     backend.append_source(&format!("{}\n", r));
 
-    match backend.semantic.parser.lexer.top.tok {
+    match backend.semantic.parser.lexers[0].top.tok {
         Token::Struct | Token::Enum | Token::Extern | Token::Fn | Token::Macro => {
             let tl = backend.semantic.parser.parse_top_level()?;
             backend.semantic.parser.top_level.push(tl);
@@ -69,7 +69,7 @@ fn repl_loop(backend: &mut Backend, repl_stmt_count: i64) -> Result<(), CompileE
                     .lock()
                     .unwrap()
                     .keys()
-                    .map(|k| backend.semantic.parser.lexer.resolve_unchecked(*k))
+                    .map(|k| backend.semantic.parser.lexers[0].resolve_unchecked(*k))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
